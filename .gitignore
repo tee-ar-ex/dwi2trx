@@ -1,0 +1,11 @@
+node_modules/
+/dist/
+*.log
+.DS_Store
+
+# Local dev reference data (regenerable; not deployed) and scratch artifacts
+/commandline/
+/_*.mjs
+/_*.png
+/audit_temp.md
+/audit_response.md

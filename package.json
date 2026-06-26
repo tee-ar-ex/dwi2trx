@@ -1,0 +1,32 @@
+{
+  "name": "dwi2trx",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser-only diffusion MRI pipeline: load DWI, fit the tensor, track streamlines, save TRX. No data leaves your machine.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "format": "biome check --write",
+    "test": "node --experimental-strip-types src/dwi2trx/validate.test.ts && node --experimental-strip-types src/dwi2trx/dtifit.test.ts && node --experimental-strip-types src/lib/nifti-geometry.test.ts && node --experimental-strip-types src/dwi2trx/niimath-sform.test.ts && node --experimental-strip-types src/dwi2trx/tracking/backoff.test.ts && node --experimental-strip-types src/dwi2trx/tracking/nifti-read.test.ts && node --experimental-strip-types src/dwi2trx/tracking/tracking.test.ts",
+    "test:e2e": "npm run build && node e2e/smoke.mjs",
+    "test:stress": "npm run build && node e2e/stress.mjs"
+  },
+  "dependencies": {
+    "@niivue/dcm2niix": "^1.2.0",
+    "@niivue/niimath": "file:./vendor/niimath",
+    "@niivue/niivue": "1.0.0-rc.9",
+    "fflate": "^0.8.3",
+    "gl-matrix": "^3.4.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.10",
+    "@webgpu/types": "^0.1.52",
+    "puppeteer-core": "^25.2.1",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.2"
+  }
+}

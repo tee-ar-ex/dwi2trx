@@ -1,0 +1,2 @@
+# Committed DIPY golden fixtures (DIPY-generated offline; see CLAUDE.md)
+src/dwi2trx/tracking/goldens.json -diff linguist-generated

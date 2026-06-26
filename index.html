@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="./src/style.css" />
+  <link rel="icon" href="./favicon.ico" />
+  <title>dwi2trx</title>
+</head>
+
+<!-- data-tab is the active tab; main.ts sets it and toggles tab [disabled]. -->
+<body data-tab="1">
+  <header>
+    <div class="row brandrow">
+      <strong class="brand">dwi2trx</strong>
+      <nav class="tabs" aria-label="Pipeline steps">
+        <button type="button" class="tab" data-tab="1">1 · Select input</button>
+        <button type="button" class="tab" data-tab="2" disabled>2 · Tensor maps</button>
+        <button type="button" class="tab" data-tab="3" disabled>3 · Streamlines</button>
+      </nav>
+      <div class="viz">
+        <select id="sliceType" title="How to display the volume">
+          <option value="0">Axial</option>
+          <option value="1">Coronal</option>
+          <option value="2">Sagittal</option>
+          <option value="3" selected>A+C+S+R</option>
+          <option value="4">Render</option>
+        </select>
+        <button type="button" id="aboutBtn" title="About dwi2trx">About</button>
+      </div>
+    </div>
+
+    <!-- Per-tab control rows. Shown only when body[data-tab] matches. -->
+    <div class="row tabpanel" data-tab="1">
+      <label>Drag &amp; drop your DWI (NIfTI + bval + bvec) or a folder of DICOMs, or</label>
+      <button type="button" id="chooseBtn" title="Pick a NIfTI + bval + bvec triple, or DICOM files">Choose files…</button>
+      <input type="file" id="filePicker" multiple hidden />
+      <button type="button" id="maskFitBtn" disabled title="Brain-extract the b0 with mindgrab (WebGPU), then fit the tensor">Mask + fit tensor</button>
+    </div>
+    <div class="row tabpanel" data-tab="2">
+      <label for="displayMode">Display</label>
+      <select id="displayMode" title="How to display the tensor maps">
+        <option value="0">FA</option>
+        <option value="1">V1</option>
+        <option value="2">V1 modulated by FA</option>
+        <option value="3">V1 (isV1SliceShader)</option>
+        <option value="4" selected>V1 modulated by FA (isV1SliceShader)</option>
+      </select>
+      <label for="faSlider">FA floor</label>
+      <input type="range" min="0" max="100" value="10" class="slider" id="faSlider"
+        title="Hide voxels below this fractional-anisotropy threshold" />
+      <button type="button" id="saveMapsBtn" disabled title="Download the FA + V1 NIfTI maps">Save maps</button>
+    </div>
+    <div class="row tabpanel" data-tab="2">
+      <label for="seedFa" title="Seed streamlines only where FA ≥ this">Seed FA</label>
+      <input type="number" id="seedFa" min="0" max="1" step="0.05" value="0.25" />
+      <label for="stopFa" title="Stop a streamline where FA falls below this">Stop FA</label>
+      <input type="number" id="stopFa" min="0" max="1" step="0.05" value="0.10" />
+      <label for="stepSize" title="Integration step size, in voxels">Step</label>
+      <input type="number" id="stepSize" min="0.1" max="2" step="0.1" value="0.5" />
+      <label for="maxAngle" title="Maximum turn angle per step, in degrees">Angle°</label>
+      <input type="number" id="maxAngle" min="10" max="90" step="5" value="60" />
+      <label for="seedDensity" title="Seeds per voxel along each axis (count = value³)">Density</label>
+      <input type="number" id="seedDensity" min="1" max="4" step="1" value="1" />
+      <button type="button" id="trackBtn">Generate streamlines</button>
+    </div>
+    <div class="row tabpanel" data-tab="3">
+      <label for="fiberColor">Fiber color</label>
+      <select id="fiberColor" title="How to colour the streamlines">
+        <option value="local" selected>Local direction</option>
+        <option value="global">Global direction</option>
+        <option value="fixed">Fixed</option>
+      </select>
+      <button type="button" id="saveBtn" disabled>Save TRX</button>
+    </div>
+  </header>
+
+  <main id="canvas-container">
+    <canvas id="gl1"></canvas>
+    <div id="dropOverlay" class="hidden">Drop files to load</div>
+  </main>
+
+  <footer>
+    <div class="statusrow">
+      <span class="spinner hidden" id="spinner" aria-hidden="true"></span>
+      <span class="status" id="status">Loading sample…</span>
+    </div>
+    <div class="location" id="location"></div>
+  </footer>
+
+  <dialog id="aboutDlg">
+    <h2>dwi2trx</h2>
+    <p>A browser-only diffusion-MRI pipeline: load a DWI, fit the diffusion tensor, track streamlines, and save a TRX tractogram. Everything runs client-side — no data leaves your machine.</p>
+    <p>It is built on
+      <a href="https://github.com/niivue/niivue" target="_blank" rel="noopener">NiiVue</a> (visualization),
+      <a href="https://github.com/niivue/niivue-dcm2niix" target="_blank" rel="noopener">dcm2niix</a> (image conversion),
+      <a href="https://github.com/rordenlab/niimath" target="_blank" rel="noopener">niimath</a> (image processing),
+      <a href="https://github.com/neuroneural/brainchop" target="_blank" rel="noopener">brainchop</a>'s mindgrab (masking), and
+      <a href="https://github.com/dipy/GPUStreamlines" target="_blank" rel="noopener">GPUStreamlines</a> to extract tracts from diffusion data.</p>
+    <form method="dialog"><button type="submit">Close</button></form>
+  </dialog>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+
+</html>

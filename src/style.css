@@ -1,0 +1,240 @@
+:root {
+  --bg: #1c1c1f;
+  --panel: #2a2a2e;
+  --border: #444;
+  --accent: #4a6dff;
+  --muted: #888;
+  --text: #f0f0f0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  user-select: none;
+}
+
+header {
+  padding: 8px 12px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+header .row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.brand {
+  font-size: 1.1rem;
+  letter-spacing: 0.5px;
+}
+
+/* Tabs: clickable pills. Disabled tabs are locked until their step is ready;
+   the active tab (body[data-tab]) is highlighted. */
+.tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tab {
+  font-size: 0.8rem;
+  color: var(--text); /* inactive (enabled) tabs: white text */
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.tab:disabled {
+  color: #5f5f5f; /* disabled tabs: dark gray (never also active) */
+  opacity: 1;
+  cursor: default;
+}
+
+/* Global visualization controls, right-justified on the top row. */
+.viz {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Numeric tracking-parameter inputs. Wide enough that the value shows in full
+   alongside the spin buttons (border-box + spinners eat ~2.5em). */
+input[type="number"] {
+  width: 9em;
+  padding: 5px 8px;
+  cursor: text;
+}
+
+body[data-tab="1"] .tab[data-tab="1"],
+body[data-tab="2"] .tab[data-tab="2"],
+body[data-tab="3"] .tab[data-tab="3"] {
+  color: var(--text);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Only the control row matching the active tab is shown. `header .tabpanel`
+   matches the specificity of `header .row` (and comes later) so the hide wins;
+   the show rule below is more specific still. */
+header .tabpanel {
+  display: none;
+}
+
+body[data-tab="1"] .tabpanel[data-tab="1"],
+body[data-tab="2"] .tabpanel[data-tab="2"],
+body[data-tab="3"] .tabpanel[data-tab="3"] {
+  display: flex;
+}
+
+button,
+select,
+input[type="number"] {
+  font-family: inherit;
+  font-size: 0.85rem;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+label {
+  font-size: 0.85rem;
+}
+
+main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+#gl1 {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#dropOverlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 25%, rgba(0, 0, 0, 0.6));
+  border: 3px dashed var(--accent);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.hidden {
+  /* biome-ignore lint/complexity/noImportantStyles: must beat the higher-specificity body[data-tab] .tabpanel rules */
+  display: none !important;
+}
+
+footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+.statusrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* Spinning busy indicator shown beside the status text during slow work
+   (mindgrab brain extraction, the dtifit tensor fit, DICOM conversion). */
+.spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status.error {
+  color: #ff6b6b;
+}
+
+/* Live voxel readout (NiiVue location/intensity), right-aligned. */
+.location {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* About dialog. */
+#aboutDlg {
+  max-width: 32rem;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  line-height: 1.5;
+}
+#aboutDlg h2 {
+  margin: 0 0 8px;
+}
+#aboutDlg a {
+  color: var(--accent);
+}
+#aboutDlg button {
+  margin-top: 8px;
+}
+#aboutDlg::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}

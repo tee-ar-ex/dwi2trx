@@ -1,0 +1,21 @@
+{
+  "name": "@niivue/niimath",
+  "version": "1.2.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./niimath.js": "./dist/niimath.js"
+  },
+  "author": "NiiVue developers",
+  "license": "BSD-2-Clause",
+  "description": "Local dtifit-enabled WASM build of niimath, vendored into dwi2trx. Runtime-only manifest — build scripts/devDeps live in the source repo.",
+  "files": [
+    "dist/"
+  ]
+}
