@@ -132,11 +132,76 @@ async function main() {
     })
     if (!hasAdapter) throw new SkipError('no WebGPU adapter in this browser')
 
+    // Vector-dialog regressions: both dialogs must start hidden; the generator's
+    // controls must remain reachable on a phone-sized viewport; closing in the
+    // opening task must cancel generation rather than attach to a hidden canvas.
+    console.log('→ checking vector dialogs')
+    const initiallyHidden = await page.evaluate(() =>
+      ['vecDlg', 'genVecDlg'].every((id) => {
+        const dialog = document.getElementById(id)
+        return (
+          dialog && !dialog.open && getComputedStyle(dialog).display === 'none'
+        )
+      }),
+    )
+    if (!initiallyHidden) throw new Error('a closed vector dialog is visible')
+
+    await page.setViewport({ width: 375, height: 667 })
+    const narrow = await page.evaluate(() => {
+      document.getElementById('genVecBtn').click()
+      const dialog = document.getElementById('genVecDlg')
+      const save = document
+        .getElementById('genVecSaveBtn')
+        .getBoundingClientRect()
+      const closeButton = dialog.querySelector('form button')
+      const close = closeButton.getBoundingClientRect()
+      const bounds = dialog.getBoundingClientRect()
+      closeButton.click()
+      return {
+        controlsFit: save.right <= bounds.right && close.right <= bounds.right,
+      }
+    })
+    if (!narrow.controlsFit) {
+      throw new Error('generator Save/Close controls are clipped at 375px')
+    }
+    await sleep(750)
+    const closeCancelled = await page.evaluate(() => {
+      const dialog = document.getElementById('genVecDlg')
+      const info = document.getElementById('genVecInfo').textContent || ''
+      return (
+        !dialog.open &&
+        document.getElementById('genVecSaveBtn').disabled &&
+        !/volumes/.test(info)
+      )
+    })
+    if (!closeCancelled)
+      throw new Error('closed generator committed stale work')
+
+    await page.setViewport({ width: 1280, height: 800 })
+    await page.click('#genVecBtn')
+    await page.waitForSelector('#genVecSaveBtn:not([disabled])', {
+      timeout: 30000,
+    })
+    await page.click('#genVecDlg form button')
+
     // 1. sample auto-loads -> Mask+fit button enables
     console.log('→ waiting for sample to load')
     await page.waitForSelector('#maskFitBtn:not([disabled])', {
       timeout: 60000,
     })
+
+    // Rapid repeated activation must still produce one usable scheme preview.
+    await page.evaluate(() => {
+      const button = document.getElementById('showVecBtn')
+      button.click()
+      button.click()
+    })
+    await page.waitForFunction(
+      () =>
+        /directions/.test(document.getElementById('vecInfo').textContent || ''),
+      { timeout: 30000 },
+    )
+    await page.click('#vecDlg form button')
 
     // 2. mask + fit tensor -> Save maps enables (state.maps set). Works without
     //    WebGPU (unmasked fallback), so a timeout here is a real regression.

@@ -10,6 +10,8 @@ A browser-only diffusion-MRI pipeline: drag in a DWI, fit the diffusion tensor, 
 2. **Tensor maps** — fit the diffusion tensor and view the principal eigenvector (V1) coloured by direction and modulated by fractional anisotropy (FA). The fit applies a mindgrab brain mask when WebGPU can run it, falling back to an unmasked fit otherwise.
 3. **Streamlines** — track white-matter streamlines on the GPU, render them over the FA in a clipped 3D view, and save a `.trx` tractogram. Seed/stop FA thresholds, step size, turn angle, and seed density are all adjustable.
 
+Two vector tools sit alongside the pipeline. **Show vectors** renders the loaded DWI's gradient scheme (bvec/bval) as a NiiVue ball preview — a b0 at the origin and each direction placed at unit(bvec)×bval, sized by repeat count and coloured by b-value — so you can eyeball whole- vs half-sphere and single- vs multi-shell coverage. **Generate Vectors** designs a uniform multi-shell scheme (editable shells, uniformity α, b0-every-N) with a repulsion-based direction relaxation and saves it as a Siemens DVS file.
+
 Needs a recent desktop Chrome or Edge (WebGPU with subgroup support). Or just open the demo and drop in your data.
 
 ## Notes

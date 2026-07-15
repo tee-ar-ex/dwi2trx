@@ -8,6 +8,14 @@
 
 import NiiVueGPU, { SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { cropFirstVolume, fitTensor } from './dwi2trx/dtifit'
+import {
+  type GenScheme,
+  generateScheme,
+  type ShellSpec,
+  schemeBaseName,
+  schemeToDvs,
+  suggestNextShell,
+} from './dwi2trx/genvectors'
 import { collectFiles, type ResolvedInput, resolveInput } from './dwi2trx/input'
 // mindgrab + conform are lazily imported on first "Mask + fit" (keeps the
 // ~250 KB tinygrad model + gl-matrix out of the initial bundle, like
@@ -20,6 +28,11 @@ import {
   type TensorMaps,
 } from './dwi2trx/state'
 import { baseName } from './dwi2trx/validate'
+import {
+  buildGradientScheme,
+  buildSchemeFromSamples,
+  type GradientScheme,
+} from './dwi2trx/vectors'
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id)
@@ -28,6 +41,23 @@ const $ = <T extends HTMLElement>(id: string): T => {
 }
 
 const maskFitBtn = $<HTMLButtonElement>('maskFitBtn')
+const showVecBtn = $<HTMLButtonElement>('showVecBtn')
+const vecDlg = $<HTMLDialogElement>('vecDlg')
+const vecCanvas = $<HTMLCanvasElement>('vecCanvas')
+const vecScale = $<HTMLInputElement>('vecScale')
+const vecInfo = $<HTMLDivElement>('vecInfo')
+const genVecBtn = $<HTMLButtonElement>('genVecBtn')
+const genVecDlg = $<HTMLDialogElement>('genVecDlg')
+const genVecCanvas = $<HTMLCanvasElement>('genVecCanvas')
+const genVecScale = $<HTMLInputElement>('genVecScale')
+const genVecInfo = $<HTMLSpanElement>('genVecInfo')
+const genVecSaveBtn = $<HTMLButtonElement>('genVecSaveBtn')
+const genVecShells = $<HTMLDivElement>('genVecShells')
+const genVecAddShell = $<HTMLButtonElement>('genVecAddShell')
+const genVecDelShell = $<HTMLButtonElement>('genVecDelShell')
+const genVecAlpha = $<HTMLInputElement>('genVecAlpha')
+const genVecAlphaVal = $<HTMLSpanElement>('genVecAlphaVal')
+const genVecB0 = $<HTMLInputElement>('genVecB0')
 const chooseBtn = $<HTMLButtonElement>('chooseBtn')
 const filePicker = $<HTMLInputElement>('filePicker')
 const trackBtn = $<HTMLButtonElement>('trackBtn')
@@ -88,6 +118,7 @@ function num(
 function render(): void {
   document.body.dataset.tab = String(state.step)
   maskFitBtn.disabled = !state.input
+  showVecBtn.disabled = !state.input
   saveMapsBtn.disabled = !state.maps
   saveBtn.disabled = !state.tracts
   for (const t of tabEls) {
@@ -128,6 +159,47 @@ sliceTypeSel.addEventListener('change', () => {
   nv.drawScene()
 })
 aboutBtn.addEventListener('click', () => aboutDlg.showModal())
+showVecBtn.addEventListener('click', () => {
+  void showVectors()
+})
+vecScale.addEventListener('input', () => updateVecScale(Number(vecScale.value)))
+genVecBtn.addEventListener('click', () => {
+  void openGenVectors()
+})
+genVecAddShell.addEventListener('click', () => {
+  genShells.push(suggestNextShell(genShells)) // √b rule: +1000 b, √-scaled count
+  renderShellRows()
+  scheduleGenerate()
+})
+genVecDelShell.addEventListener('click', () => {
+  if (genShells.length <= 1) return // keep at least a single shell
+  genShells.pop()
+  renderShellRows()
+  scheduleGenerate()
+})
+genVecAlpha.addEventListener('input', () => {
+  genVecAlphaVal.textContent = Number(genVecAlpha.value).toFixed(2)
+  scheduleGenerate()
+})
+genVecB0.addEventListener('input', () => {
+  scheduleGenerate()
+})
+genVecScale.addEventListener('input', () =>
+  updateGenScale(Number(genVecScale.value)),
+)
+// Invalidate both a pending debounce and any async preview work when dismissed.
+genVecDlg.addEventListener('close', () => {
+  clearTimeout(genTimer)
+  genRevision++
+  genPending = false
+  genScheme = null
+  genVecSaveBtn.disabled = true
+})
+genVecSaveBtn.addEventListener('click', () => {
+  if (!genScheme) return
+  const name = `DiffusionVectors_${schemeBaseName(genScheme.shells)}.dvs`
+  download(new Blob([schemeToDvs(genScheme)], { type: 'text/plain' }), name)
+})
 function download(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -151,6 +223,303 @@ saveMapsBtn.addEventListener('click', () => {
 faSlider.addEventListener('input', () => {
   if (shownView === 'maps') setFaFloor() // ignore while the raw DWI is shown
 })
+
+// --- Gradient connectome preview (shared by both vector modals) ---
+// A lightweight NiiVue instance in a modal that renders a bvec/bval scheme as a
+// ball connectome (one node per distinct sample), rotatable and independent of
+// the main viewer — it never touches the spatial image on the primary canvas.
+// Two modals reuse this: "Show vectors" (the loaded DWI's scheme) and "Generate
+// Vectors" (a freshly optimized scheme). Each keeps its own viewer, created
+// lazily and reused.
+
+/** Build a render-only NiiVue viewer on `canvas` (rotatable, no slice views,
+ *  no orientation cube — anatomical labels are meaningless in gradient space). */
+async function makeRenderViewer(canvas: HTMLCanvasElement): Promise<NiiVueGPU> {
+  const v = new NiiVueGPU({
+    isDragDropEnabled: false,
+    backgroundColor: [0, 0, 0, 1],
+  })
+  await v.attachToCanvas(canvas)
+  v.sliceType = SLICE_TYPE.RENDER
+  v.isOrientCubeVisible = false
+  return v
+}
+
+// Each modal owns ONE viewer, created lazily. We cache the init *promise* (not the
+// resolved instance) and assign it synchronously, so two rapid opens can never
+// both pass a `!viewer` check and double-attach two NiiVue controls to one canvas.
+let vecViewerPromise: Promise<NiiVueGPU> | null = null
+let genViewerPromise: Promise<NiiVueGPU> | null = null
+
+function getVecViewer(): Promise<NiiVueGPU> {
+  if (!vecViewerPromise) {
+    const pending = makeRenderViewer(vecCanvas)
+    vecViewerPromise = pending
+    void pending.catch(() => {
+      if (vecViewerPromise === pending) vecViewerPromise = null
+    })
+  }
+  return vecViewerPromise
+}
+
+function getGenViewer(): Promise<NiiVueGPU> {
+  if (!genViewerPromise) {
+    const pending = makeRenderViewer(genVecCanvas)
+    genViewerPromise = pending
+    void pending.catch(() => {
+      if (genViewerPromise === pending) genViewerPromise = null
+    })
+  }
+  return genViewerPromise
+}
+
+// Mesh replacement and node re-extrusion both mutate the viewer's GPU scene.
+// Keep those operations in one short queue per viewer so slider input cannot
+// overlap a preview load. A rejected operation does not poison later retries.
+const viewerMutationTail = new WeakMap<NiiVueGPU, Promise<void>>()
+async function mutateViewer(
+  v: NiiVueGPU,
+  mutation: () => Promise<void>,
+): Promise<void> {
+  const previous = viewerMutationTail.get(v) ?? Promise.resolve()
+  const current = previous.catch(() => {}).then(mutation)
+  viewerMutationTail.set(v, current)
+  try {
+    await current
+  } finally {
+    if (viewerMutationTail.get(v) === current) viewerMutationTail.delete(v)
+  }
+}
+
+/** Load a gradient scheme into a viewer as a connectome, crosshair at the origin
+ *  (the b=0 centre). `nodeScale` seeds the node radii; the live slider tweaks it. */
+async function loadSchemePreview(
+  v: NiiVueGPU,
+  scheme: GradientScheme,
+  nodeScale: number,
+): Promise<void> {
+  await mutateViewer(v, async () => {
+    // Serialize to a `.jcon` File so NiiVue's connectome reader ingests it.
+    const jcon = new File(
+      [
+        JSON.stringify({
+          ...scheme.options,
+          nodeScale,
+          nodes: scheme.data.nodes,
+          edges: scheme.data.edges,
+        }),
+      ],
+      'vectors.jcon',
+    )
+    // loadMeshes() clears existing meshes itself, so no explicit removeAllMeshes.
+    await v.loadMeshes([
+      { url: jcon, name: 'vectors.jcon', isLegendVisible: false },
+    ])
+    // Park the crosshair on the world origin so it reads as a reference marker.
+    v.setCrosshairPos([0, 0, 0])
+    v.drawScene()
+  })
+}
+
+/** A per-frame-coalesced, non-overlapping node-scale updater for one viewer: many
+ *  slider `input` events during a drag collapse to one `setConnectomeOptions`
+ *  (re-extrude) per animation frame, and a new value never starts before the
+ *  previous apply resolves. */
+function makeNodeScaleUpdater(
+  getViewer: () => Promise<NiiVueGPU> | null,
+): (value: number) => void {
+  let pending: number | null = null
+  let running = false
+  const pump = async (): Promise<void> => {
+    if (running || pending === null) return
+    running = true
+    const value = pending
+    pending = null
+    try {
+      const p = getViewer()
+      const v = p ? await p : null
+      if (v?.meshes.length) {
+        await mutateViewer(v, () =>
+          v.setConnectomeOptions(0, { nodeScale: value }),
+        )
+      }
+    } catch {
+      // Viewer initialization/load reports through its owning modal. A failed
+      // slider update must not become an unhandled rejection.
+    } finally {
+      running = false
+      if (pending !== null) requestAnimationFrame(() => void pump())
+    }
+  }
+  return (value: number) => {
+    pending = value
+    if (!running) requestAnimationFrame(() => void pump())
+  }
+}
+const updateVecScale = makeNodeScaleUpdater(() => vecViewerPromise)
+const updateGenScale = makeNodeScaleUpdater(() => genViewerPromise)
+
+async function showVectors(): Promise<void> {
+  const input = state.input
+  if (!input || vecDlg.open) return // ignore a double-click while already open
+  const seq = loadSeq // the input identity this preview belongs to
+  // Open the modal SYNCHRONOUSLY, before any await: the `.open` guard above then
+  // reliably rejects a rapid second click (which would otherwise race the reads
+  // below and double-open). The canvas also gets its layout size up front.
+  vecInfo.textContent = 'Reading gradients…'
+  vecDlg.showModal()
+  try {
+    const [bvalText, bvecText] = await Promise.all([
+      input.bval.text(),
+      input.bvec.text(),
+    ])
+    if (seq !== loadSeq || !vecDlg.open) {
+      if (vecDlg.open) vecDlg.close() // a newer DWI replaced the input mid-read
+      return
+    }
+    const scheme = buildGradientScheme(bvalText, bvecText)
+    const shellTxt = scheme.shells.map(([b, n]) => `b=${b}×${n}`).join(', ')
+    vecInfo.textContent = `${scheme.directions} directions · ${scheme.nodes} unique · ${shellTxt}`
+    const viewer = await getVecViewer()
+    if (seq !== loadSeq || !vecDlg.open) return
+    await loadSchemePreview(viewer, scheme, Number(vecScale.value))
+  } catch (err) {
+    vecDlg.close()
+    setStatus(`Could not show vectors: ${(err as Error).message}`, true)
+  }
+}
+
+// --- Diffusion vector-set generator ---
+// Optimize uniform multi-shell directions (antipodal electrostatic repulsion),
+// preview them in the shared connectome viewer, and save a Siemens DVS. A
+// standalone tool — needs no loaded DWI.
+let genScheme: GenScheme | null = null
+// The editable shell list (directions × b-value). Rendered as rows in the modal.
+// Defaults follow the √b rule (24@1000 → 33@2000); the middle shell density
+// keeps SNR roughly constant across shells.
+const genShells: ShellSpec[] = [
+  { count: 24, bval: 1000 },
+  { count: 33, bval: 2000 },
+]
+
+/** Redraw the shell-editor rows from `genShells`. */
+function renderShellRows(): void {
+  genVecShells.replaceChildren()
+  genShells.forEach((sh, i) => {
+    const row = document.createElement('div')
+    row.className = 'genvec-shell'
+
+    const count = document.createElement('input')
+    count.type = 'number'
+    count.min = '1'
+    count.max = '500'
+    count.step = '1'
+    count.value = String(sh.count)
+    count.title = 'Directions in this shell'
+    count.addEventListener('input', () => {
+      genShells[i].count = Math.max(0, Math.round(count.valueAsNumber || 0))
+      scheduleGenerate()
+    })
+
+    const times = document.createElement('span')
+    times.textContent = '×'
+
+    const bval = document.createElement('input')
+    bval.type = 'number'
+    bval.min = '1'
+    bval.max = '30000'
+    bval.step = '100'
+    bval.value = String(sh.bval)
+    bval.title = 'b-value (s/mm²) for this shell'
+    bval.addEventListener('input', () => {
+      genShells[i].bval = Math.max(0, Math.round(bval.valueAsNumber || 0))
+      scheduleGenerate()
+    })
+
+    row.append(count, times, bval)
+    genVecShells.append(row)
+  })
+  // The paired "− Remove shell" button removes the last shell; never below one.
+  genVecDelShell.disabled = genShells.length <= 1
+}
+
+// Auto-regenerate is debounced (rapid typing/slider drags collapse into one
+// run) and coalesced (`genBusy`/`genPending`): a change arriving mid-run queues
+// exactly one more pass with the latest settings, so overlapping GPU mesh loads
+// never race on the shared viewer.
+let genTimer: ReturnType<typeof setTimeout> | undefined
+let genBusy = false
+let genPending = false
+let genRevision = 0
+
+/** Debounced trigger for auto-regeneration after an input changes. Invalidates
+ *  the current scheme + Save synchronously, so a click during the debounce can't
+ *  download a DVS that disagrees with the edited form. */
+function scheduleGenerate(): void {
+  genRevision++
+  genScheme = null
+  genVecSaveBtn.disabled = true // re-enabled only when the new run completes
+  clearTimeout(genTimer)
+  genTimer = setTimeout(() => void runGenerate(), 250)
+}
+
+/** Optimize the current settings and refresh the preview; coalesces re-entrant
+ *  requests so the final run always reflects the latest inputs. */
+async function runGenerate(): Promise<void> {
+  if (genBusy) {
+    genPending = true // fold this request into the run in flight
+    return
+  }
+  genBusy = true
+  try {
+    do {
+      genPending = false
+      const revision = genRevision
+      genVecInfo.classList.remove('error')
+      genVecInfo.textContent = 'Generating…'
+      // Yield once so the "Generating…" label paints before the synchronous,
+      // main-thread O(N²) relaxation blocks (moving it to a worker is deferred).
+      await new Promise((r) => setTimeout(r, 0))
+      if (!genVecDlg.open || revision !== genRevision) continue
+      try {
+        const scheme = generateScheme(genShells, {
+          alpha: Number(genVecAlpha.value),
+          b0Every: Math.max(0, Math.round(genVecB0.valueAsNumber || 0)),
+        })
+        // Build the preview straight from the structured scheme — scheme.dirs are
+        // already unit directions + bval (no bval/bvec text round-trip).
+        const preview = buildSchemeFromSamples(scheme.dirs)
+        const genViewer = await getGenViewer()
+        if (!genVecDlg.open || revision !== genRevision) continue
+        await loadSchemePreview(genViewer, preview, Number(genVecScale.value))
+        if (!genVecDlg.open || revision !== genRevision) continue
+        genScheme = scheme
+        const nB0 = scheme.dirs.filter((d) => d.bval <= 0).length
+        const shellTxt = scheme.shells
+          .map((s) => `${s.count}×b=${s.bval}`)
+          .join(', ')
+        genVecInfo.textContent = `${scheme.dirs.length} volumes · ${shellTxt}, ${nB0} b0`
+        genVecSaveBtn.disabled = false
+      } catch (err) {
+        if (!genVecDlg.open || revision !== genRevision) continue
+        genScheme = null
+        genVecSaveBtn.disabled = true
+        genVecInfo.classList.add('error')
+        genVecInfo.textContent = (err as Error).message
+      }
+    } while (genPending && genVecDlg.open)
+  } finally {
+    genBusy = false
+  }
+}
+
+async function openGenVectors(): Promise<void> {
+  if (genVecDlg.open) return // ignore a double-click while already open
+  clearTimeout(genTimer) // cancel any debounce armed before the last close
+  genVecDlg.showModal() // open first so the canvas has a layout size
+  renderShellRows()
+  await runGenerate() // generate immediately with the current settings
+}
 
 // --- Drag & drop ---
 // Prevent the browser's default "navigate to dropped file" on the WHOLE window —

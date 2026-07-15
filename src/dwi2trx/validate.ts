@@ -22,17 +22,29 @@ export function parseNumbers(text: string): number[] {
     .map(Number)
 }
 
+/** Parsed FSL diffusion gradients: one bval per volume + three bvec rows. */
+export interface ParsedGradients {
+  bvals: number[]
+  bvecs: [number[], number[], number[]]
+}
+
 /**
- * Validate a bval/bvec pair and return the gradient-direction count.
- *
- * FSL layout: bval is one row of V values; bvec is 3 rows of V values. Throws a
- * caller-facing Error if the files are malformed or inconsistent.
+ * Parse + validate an FSL-layout bval/bvec pair (bval = one row of V values;
+ * bvec = 3 rows of V values). Single source of truth for the checks: empty,
+ * finite, non-negative b-values, 3 rows, matching lengths. Throws a
+ * caller-facing Error on any problem.
  */
-export function countDirections(bvalText: string, bvecText: string): number {
+export function parseBvalBvec(
+  bvalText: string,
+  bvecText: string,
+): ParsedGradients {
   const bvals = parseNumbers(bvalText)
   if (bvals.length === 0) throw new Error('bval file is empty.')
   if (!bvals.every(Number.isFinite)) {
     throw new Error('bval contains non-numeric or non-finite values.')
+  }
+  if (bvals.some((b) => b < 0)) {
+    throw new Error('bval contains negative values.')
   }
 
   const rows = bvecText
@@ -40,11 +52,11 @@ export function countDirections(bvalText: string, bvecText: string): number {
     .split(/\r?\n/)
     .map((r) => r.trim())
     .filter((r) => r.length > 0)
+    .map(parseNumbers)
   if (rows.length !== 3) {
     throw new Error(`bvec must have 3 rows (x/y/z), found ${rows.length}.`)
   }
-  for (const row of rows) {
-    const v = parseNumbers(row)
+  for (const v of rows) {
     if (v.length !== bvals.length) {
       throw new Error(
         `bvec row has ${v.length} values but bval lists ${bvals.length} directions.`,
@@ -54,7 +66,15 @@ export function countDirections(bvalText: string, bvecText: string): number {
       throw new Error('bvec contains non-numeric or non-finite values.')
     }
   }
-  return bvals.length
+  return { bvals, bvecs: [rows[0], rows[1], rows[2]] }
+}
+
+/**
+ * Validate a bval/bvec pair and return the gradient-direction count. Thin
+ * wrapper over {@link parseBvalBvec}.
+ */
+export function countDirections(bvalText: string, bvecText: string): number {
+  return parseBvalBvec(bvalText, bvecText).bvals.length
 }
 
 /** A diffusion-series candidate: gradient directions (bval) vs NIfTI 4D volumes. */
