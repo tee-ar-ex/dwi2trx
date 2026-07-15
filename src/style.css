@@ -238,3 +238,180 @@ footer {
 #aboutDlg::backdrop {
   background: rgba(0, 0, 0, 0.55);
 }
+
+/* Gradient sampling-scheme viewer: an independent, resizable NiiVue render. */
+#vecDlg {
+  width: min(80vw, 900px);
+  height: min(80vh, 760px);
+  max-width: 90vw;
+  max-height: 90vh;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+}
+/* Only when open — scoping to [open] preserves the UA `dialog:not([open])
+   { display: none }`, so a closed dialog stays hidden (an ID rule with a bare
+   `display` would override it and show the dialog on load). */
+#vecDlg[open] {
+  display: flex;
+  flex-direction: column; /* head (auto) + body (fills) — no fixed-header math */
+}
+#vecDlg::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.vecdlg-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.vecdlg-info {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.vecdlg-spacer {
+  margin-left: auto;
+}
+.vecdlg-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+#vecCanvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: block;
+  background: #000;
+}
+.vecdlg-hint {
+  margin: 0;
+  padding: 8px 14px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+}
+.vecdlg-hint a {
+  color: var(--accent);
+}
+
+/* Diffusion vector-set generator: a controls sidebar + connectome preview. */
+#genVecDlg {
+  width: min(92vw, 1040px);
+  height: min(86vh, 800px);
+  max-width: 94vw;
+  max-height: 92vh;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+}
+/* Only when open (see #vecDlg[open] above) so a closed dialog stays hidden. */
+#genVecDlg[open] {
+  display: flex;
+  flex-direction: column; /* head (auto) + body (fills) — no fixed-header math */
+}
+#genVecDlg::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.genvec-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.genvec-side {
+  flex: none;
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.genvec-label {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.genvec-shells {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.genvec-shell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.genvec-shell input[type="number"] {
+  width: 6em;
+  padding: 4px 6px;
+}
+.genvec-shellbtns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.genvec-add {
+  font-size: 0.8rem;
+  padding: 4px 10px;
+}
+.genvec-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+}
+.genvec-params input[type="range"] {
+  width: 100%;
+}
+.genvec-params input[type="number"] {
+  width: 6em;
+}
+.genvec-view {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+#genVecCanvas {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  display: block;
+  background: #000;
+}
+
+@media (max-width: 600px) {
+  #genVecDlg {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+    max-width: none;
+    max-height: none;
+  }
+  .vecdlg-head {
+    flex-wrap: wrap;
+  }
+  .genvec-body {
+    flex-direction: column;
+  }
+  .genvec-side {
+    width: auto;
+    max-height: 42%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}

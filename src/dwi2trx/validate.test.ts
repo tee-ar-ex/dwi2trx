@@ -54,6 +54,7 @@ throws(
 ) // 2 cols vs 3
 throws(() => countDirections(bval, 'x y z\n0 0 0\n0 0 0'), /non-numeric/)
 throws(() => countDirections('0 Infinity 2500', bvec), /finite/) // Infinity rejected
+throws(() => countDirections('0 -1000 2500', bvec), /negative/)
 
 // --- chooseBestSeries: pick the valid candidate with the most directions ---
 // single valid candidate
