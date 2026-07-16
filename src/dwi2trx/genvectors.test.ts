@@ -5,9 +5,14 @@
 
 import assert from 'node:assert/strict'
 import {
+  calcPairWeights,
+  findPolarityBalanceWarnings,
   generateScheme,
+  measureScheme,
   normalizeShells,
   optimizeDirections,
+  optimizeIncrementalDirections,
+  polarityBalanceWarningThreshold,
   schemeBaseName,
   schemeToDvs,
   sqrtRuleCount,
@@ -16,6 +21,179 @@ import {
 
 const approx = (a: number, b: number, eps = 1e-6) =>
   assert.ok(Math.abs(a - b) <= eps, `expected ${a} ≈ ${b}`)
+
+const minSeparation = (set: ReturnType<typeof optimizeDirections>): number => {
+  let min = Math.PI
+  for (let i = 0; i < set.length; i++) {
+    for (let j = i + 1; j < set.length; j++) {
+      const dot = Math.abs(
+        set[i].x * set[j].x + set[i].y * set[j].y + set[i].z * set[j].z,
+      )
+      min = Math.min(min, Math.acos(Math.min(1, dot)))
+    }
+  }
+  return min
+}
+
+// Runtime inputs can come from DOM values or JS callers despite TypeScript types.
+// Reject non-finite controls before they silently produce random/empty results.
+{
+  assert.throws(
+    () => generateScheme([{ count: 6, bval: 1000 }], { alpha: Number.NaN }),
+    /Alpha must be finite/,
+  )
+  assert.throws(
+    () => generateScheme([{ count: 6, bval: 1000 }], { iters: Infinity }),
+    /Iteration limit must be finite/,
+  )
+  assert.throws(
+    () =>
+      generateScheme([{ count: 6, bval: 1000 }], {
+        method: 'bogus' as never,
+      }),
+    /Unknown generation method/,
+  )
+  assert.throws(
+    () => optimizeDirections([{ count: 6.5, bval: 1000 }]),
+    /positive safe integers/,
+  )
+
+  const repeatedB0 = generateScheme([{ count: 6, bval: 1000 }], {
+    b0Every: 2,
+  })
+  const b0s = repeatedB0.dirs.filter((d) => d.bval === 0)
+  assert.ok(b0s.length > 1)
+  assert.notEqual(b0s[0], b0s[1])
+
+  const invalidDvs = structuredClone(repeatedB0)
+  invalidDvs.dirs[1].x = Number.NaN
+  assert.throws(() => schemeToDvs(invalidDvs), /only finite numbers/)
+}
+
+// --- optimization diagnostics distinguish convergence from ceiling exhaustion ---
+{
+  const converged = generateScheme([{ count: 6, bval: 1000 }])
+  assert.equal(converged.optimization.method, 'simultaneous')
+  assert.equal(converged.optimization.stopReason, 'converged')
+  assert.equal(converged.optimization.converged, true)
+  assert.ok(converged.optimization.iterationsUsed < 1000)
+  assert.ok(converged.optimization.finalMaxDisplacement < 1e-7)
+
+  const limited = generateScheme([{ count: 6, bval: 1000 }], { iters: 1 })
+  assert.equal(limited.optimization.stopReason, 'max_iterations')
+  assert.equal(limited.optimization.converged, false)
+  assert.equal(limited.optimization.iterationsUsed, 1)
+  assert.ok(limited.optimization.finalMaxDisplacement > 0)
+}
+
+// --- polarity-balance warnings use a direction-count-aware threshold ---
+{
+  approx(polarityBalanceWarningThreshold(6), 0.25)
+  approx(polarityBalanceWarningThreshold(30), 0.05)
+  const metrics = measureScheme(generateScheme([{ count: 24, bval: 1000 }]))
+  assert.deepEqual(findPolarityBalanceWarnings(metrics), [])
+  metrics.shells[0].mean.norm = 0.1
+  assert.deepEqual(findPolarityBalanceWarnings(metrics), [
+    {
+      bval: 1000,
+      directions: 24,
+      meanNorm: 0.1,
+      warningThreshold: 1.5 / 24,
+    },
+  ])
+}
+
+// --- final polarity pass balances each shell for whole-sphere Eddy sampling ---
+{
+  const scheme = generateScheme([
+    { count: 24, bval: 1000 },
+    { count: 33, bval: 2000 },
+  ])
+  const metrics = measureScheme(scheme)
+  assert.equal(metrics.shells.length, 2)
+  for (const shell of metrics.shells) {
+    // Report all three component means in a failure, matching the browser QC.
+    assert.ok(
+      shell.mean.norm < 0.04,
+      `b=${shell.bval} polarity mean ` +
+        `(${shell.mean.x}, ${shell.mean.y}, ${shell.mean.z}), ` +
+        `norm=${shell.mean.norm}`,
+    )
+    assert.ok(shell.minAxisSeparationDeg > 20)
+  }
+}
+
+// --- Caruyer web-tool mode is deterministic, incremental, and ignores alpha ---
+{
+  const shells = [
+    { count: 6, bval: 1000 },
+    { count: 8, bval: 2000 },
+  ]
+  const low = optimizeIncrementalDirections(shells, { alpha: 0 })
+  const high = optimizeIncrementalDirections(shells, { alpha: 1 })
+  assert.deepEqual(low, high)
+  assert.equal(low.filter((d) => d.bval === 1000).length, 6)
+  assert.equal(low.filter((d) => d.bval === 2000).length, 8)
+  // Largest proportional deficit spreads the small shell through the sequence.
+  const lowShellIndices = low.flatMap((d, i) => (d.bval === 1000 ? [i] : []))
+  assert.ok(lowShellIndices.some((i) => i < low.length / 2))
+  assert.ok(lowShellIndices.some((i) => i >= low.length / 2))
+  // Every six-direction prefix remains useful, though unlike simultaneous
+  // optimization it does not sacrifice prefix quality for the final optimum.
+  assert.ok(minSeparation(low.slice(0, 6)) > (30 * Math.PI) / 180)
+}
+
+// --- generateScheme preserves incremental acquisition order ---
+{
+  const shells = [
+    { count: 6, bval: 1000 },
+    { count: 8, bval: 2000 },
+  ]
+  const raw = optimizeIncrementalDirections(shells)
+  const scheme = generateScheme(shells, { method: 'incremental' })
+  assert.equal(scheme.method, 'incremental')
+  const saved = scheme.dirs.slice(1)
+  assert.deepEqual(
+    saved.map((d) => d.bval),
+    raw.map((d) => d.bval),
+  )
+  const diagonal = 1 / Math.sqrt(3)
+  approx(saved[0].x, diagonal)
+  approx(saved[0].y, diagonal)
+  approx(saved[0].z, diagonal)
+  // Polarity flips can negate signed dot products, while the rigid orientation
+  // preserves their magnitude and therefore the diffusion-axis coverage.
+  for (let i = 0; i < raw.length; i++) {
+    for (let j = i + 1; j < raw.length; j++) {
+      approx(
+        Math.abs(
+          saved[i].x * saved[j].x +
+            saved[i].y * saved[j].y +
+            saved[i].z * saved[j].z,
+        ),
+        Math.abs(
+          raw[i].x * raw[j].x + raw[i].y * raw[j].y + raw[i].z * raw[j].z,
+        ),
+        1e-12,
+      )
+    }
+  }
+}
+
+// --- calcPairWeights exactly matches multishell.py::calc_weights off-diagonal ---
+{
+  const w = calcPairWeights(
+    [
+      { count: 12, bval: 1000 },
+      { count: 18, bval: 2000 },
+    ],
+    0.75,
+  )
+  approx(w.intra[0], 0.75 / (2 * 12 ** 2), 1e-15)
+  approx(w.intra[1], 0.75 / (2 * 18 ** 2), 1e-15)
+  // Python visits both (s,t) and (t,s), adding each cross matrix entry twice.
+  approx(w.cross, (2 * 0.25) / 30 ** 2, 1e-15)
+}
 
 // --- optimizeDirections: right count, unit length, deterministic ---
 {
@@ -37,20 +215,55 @@ const approx = (a: number, b: number, eps = 1e-6) =>
 {
   const dirs = optimizeDirections([{ count: 30, bval: 1000 }], { iters: 300 })
   // Minimum angular separation (antipodal-aware) should be comfortably large.
-  let minAng = Math.PI
-  for (let i = 0; i < dirs.length; i++) {
-    for (let j = i + 1; j < dirs.length; j++) {
-      const dot = Math.abs(
-        dirs[i].x * dirs[j].x + dirs[i].y * dirs[j].y + dirs[i].z * dirs[j].z,
-      )
-      minAng = Math.min(minAng, Math.acos(Math.min(1, dot)))
-    }
-  }
+  const minAng = minSeparation(dirs)
   // 30 antipodal directions on a hemisphere pack to ~20°+; assert a safe floor.
   assert.ok(
     minAng > (15 * Math.PI) / 180,
     `min separation ${(minAng * 180) / Math.PI}° too small`,
   )
+}
+
+// --- one shell: positive alpha only scales the objective, so positions match ---
+{
+  const shells = [{ count: 30, bval: 1000 }]
+  const low = optimizeDirections(shells, { alpha: 0.25 })
+  const high = optimizeDirections(shells, { alpha: 1 })
+  assert.deepEqual(low, high)
+  // At alpha=0 Python's one-shell weight matrix is identically zero: retain the
+  // seeded random initialization rather than pretending alpha has an effect.
+  const zero = optimizeDirections(shells, { alpha: 0 })
+  assert.notDeepEqual(zero, high)
+  assert.ok(minSeparation(zero) < (5 * Math.PI) / 180)
+  assert.ok(minSeparation(high) > (20 * Math.PI) / 180)
+}
+
+// --- six axes converge to the icosahedral optimum at the default ceiling ---
+{
+  const dirs = optimizeDirections([{ count: 6, bval: 1000 }])
+  // Six unoriented axes are the six antipodal vertex-pairs of an icosahedron:
+  // every |dot| = 1/sqrt(5), hence the minimum axis angle is 63.4349488°.
+  approx(
+    minSeparation(dirs),
+    Math.acos(1 / Math.sqrt(5)),
+    (0.001 * Math.PI) / 180,
+  )
+}
+
+// --- multishell alpha trade-off follows the Python reference qualitatively ---
+{
+  const shells = [
+    { count: 30, bval: 1000 },
+    { count: 30, bval: 2000 },
+  ]
+  const crossOnly = optimizeDirections(shells, { alpha: 0 })
+  const balanced = optimizeDirections(shells, { alpha: 0.5 })
+  const intraOnly = optimizeDirections(shells, { alpha: 1 })
+  const shell1 = (dirs: typeof balanced) => dirs.filter((d) => d.bval === 1000)
+  // alpha=0 permits same-shell clustering; alpha=1 permits overlap between
+  // independently optimized shells; a balanced objective avoids both.
+  assert.ok(minSeparation(shell1(crossOnly)) < (1 * Math.PI) / 180)
+  assert.ok(minSeparation(intraOnly) < (5 * Math.PI) / 180)
+  assert.ok(minSeparation(balanced) > (15 * Math.PI) / 180)
 }
 
 // --- unequal shells exercise per-shell and combined-shell force weights ---
@@ -59,18 +272,6 @@ const approx = (a: number, b: number, eps = 1e-6) =>
     { count: 12, bval: 1000 },
     { count: 18, bval: 2000 },
   ])
-  const minSeparation = (set: typeof dirs): number => {
-    let min = Math.PI
-    for (let i = 0; i < set.length; i++) {
-      for (let j = i + 1; j < set.length; j++) {
-        const dot = Math.abs(
-          set[i].x * set[j].x + set[i].y * set[j].y + set[i].z * set[j].z,
-        )
-        min = Math.min(min, Math.acos(Math.min(1, dot)))
-      }
-    }
-    return min
-  }
   assert.ok(minSeparation(dirs) > (15 * Math.PI) / 180)
   assert.ok(
     minSeparation(dirs.filter((d) => d.bval === 1000)) > (25 * Math.PI) / 180,
@@ -94,6 +295,11 @@ const approx = (a: number, b: number, eps = 1e-6) =>
   assert.equal(s.dirs.length, 13)
   assert.equal(s.dirs[0].bval, 0) // leading b0 at origin
   approx(s.dirs[0].x, 0)
+  // The first saved direction is equally oblique to all scanner axes.
+  const diagonal = 1 / Math.sqrt(3)
+  approx(s.dirs[1].x, diagonal)
+  approx(s.dirs[1].y, diagonal)
+  approx(s.dirs[1].z, diagonal)
   // First two diffusion samples come from different shells (interleaved).
   assert.notEqual(s.dirs[1].bval, s.dirs[2].bval)
   // Counts per shell preserved.
@@ -116,13 +322,13 @@ const approx = (a: number, b: number, eps = 1e-6) =>
 {
   const s = generateScheme(
     [
-      { count: 4, bval: 1000 },
-      { count: 4, bval: 4000 },
+      { count: 6, bval: 1000 },
+      { count: 6, bval: 4000 },
     ],
     { iters: 40 },
   )
   const dvs = schemeToDvs(s)
-  assert.match(dvs, /\[directions=9\]/) // 8 + leading b0
+  assert.match(dvs, /\[directions=13\]/) // 12 + leading b0
   assert.match(dvs, /coordinatesystem=xyz/)
   assert.match(dvs, /normalisation = none/)
   assert.match(dvs, /Vector\[0\] {2}= \(0\.000000, 0\.000000, 0\.000000\)/)
@@ -132,7 +338,7 @@ const approx = (a: number, b: number, eps = 1e-6) =>
   approx(len, 0.5)
   // Every non-b0 line's parsed length equals √(bval/bmax) for its shell.
   const lines = dvs.split('\n').filter((l) => /^Vector\[/.test(l))
-  assert.equal(lines.length, 9)
+  assert.equal(lines.length, 13)
   for (let i = 0; i < s.dirs.length; i++) {
     const m = lines[i].match(/\(([^,]+), ([^,]+), ([^)]+)\)/)
     assert.ok(m)
@@ -187,7 +393,7 @@ assert.deepEqual(
 {
   const s = generateScheme(
     [
-      { count: 2, bval: 1000 },
+      { count: 6, bval: 1000 },
       { count: 8, bval: 2000 },
     ],
     { iters: 20 },
@@ -244,5 +450,9 @@ throws(
   /at least one shell/,
 )
 throws(() => generateScheme([{ count: 2000, bval: 1000 }], {}), /Too many/)
+throws(
+  () => generateScheme([{ count: 5, bval: 1000 }], {}),
+  /at least 6 directions/,
+)
 
 console.log('genvectors.test.ts: all assertions passed ✓')

@@ -9,13 +9,21 @@
 import NiiVueGPU, { SHOW_RENDER, SLICE_TYPE } from '@niivue/niivue'
 import { cropFirstVolume, fitTensor } from './dwi2trx/dtifit'
 import {
+  countB0,
+  describeShells,
+  findPolarityBalanceWarnings,
   type GenScheme,
-  generateScheme,
+  measureScheme,
+  methodLabel,
   type ShellSpec,
   schemeBaseName,
   schemeToDvs,
   suggestNextShell,
 } from './dwi2trx/genvectors'
+import {
+  cancelSchemeGeneration,
+  generateSchemeInWorker,
+} from './dwi2trx/genvectors-worker-client'
 import { collectFiles, type ResolvedInput, resolveInput } from './dwi2trx/input'
 // mindgrab + conform are lazily imported on first "Mask + fit" (keeps the
 // ~250 KB tinygrad model + gl-matrix out of the initial bundle, like
@@ -32,6 +40,7 @@ import {
   buildGradientScheme,
   buildSchemeFromSamples,
   type GradientScheme,
+  withAntipodalNodes,
 } from './dwi2trx/vectors'
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -50,11 +59,13 @@ const genVecBtn = $<HTMLButtonElement>('genVecBtn')
 const genVecDlg = $<HTMLDialogElement>('genVecDlg')
 const genVecCanvas = $<HTMLCanvasElement>('genVecCanvas')
 const genVecScale = $<HTMLInputElement>('genVecScale')
-const genVecInfo = $<HTMLSpanElement>('genVecInfo')
+const genVecShowAntipodal = $<HTMLInputElement>('genVecShowAntipodal')
+const genVecInfo = $<HTMLParagraphElement>('genVecInfo')
 const genVecSaveBtn = $<HTMLButtonElement>('genVecSaveBtn')
 const genVecShells = $<HTMLDivElement>('genVecShells')
 const genVecAddShell = $<HTMLButtonElement>('genVecAddShell')
 const genVecDelShell = $<HTMLButtonElement>('genVecDelShell')
+const genVecSimultaneous = $<HTMLInputElement>('genVecSimultaneous')
 const genVecAlpha = $<HTMLInputElement>('genVecAlpha')
 const genVecAlphaVal = $<HTMLSpanElement>('genVecAlphaVal')
 const genVecB0 = $<HTMLInputElement>('genVecB0')
@@ -177,6 +188,11 @@ genVecDelShell.addEventListener('click', () => {
   renderShellRows()
   scheduleGenerate()
 })
+genVecSimultaneous.addEventListener('change', () => {
+  // Caruyer's incremental web tool has no alpha control.
+  genVecAlpha.disabled = !genVecSimultaneous.checked
+  scheduleGenerate()
+})
 genVecAlpha.addEventListener('input', () => {
   genVecAlphaVal.textContent = Number(genVecAlpha.value).toFixed(2)
   scheduleGenerate()
@@ -187,9 +203,15 @@ genVecB0.addEventListener('input', () => {
 genVecScale.addEventListener('input', () =>
   updateGenScale(Number(genVecScale.value)),
 )
+genVecShowAntipodal.addEventListener('change', () => {
+  if (!genScheme) return
+  // This is a render-only option: do not invalidate or regenerate the DVS.
+  void refreshGeneratedPreview(genScheme)
+})
 // Invalidate both a pending debounce and any async preview work when dismissed.
 genVecDlg.addEventListener('close', () => {
   clearTimeout(genTimer)
+  cancelSchemeGeneration()
   genRevision++
   genPending = false
   genScheme = null
@@ -237,12 +259,18 @@ faSlider.addEventListener('input', () => {
 async function makeRenderViewer(canvas: HTMLCanvasElement): Promise<NiiVueGPU> {
   const v = new NiiVueGPU({
     isDragDropEnabled: false,
-    backgroundColor: [0, 0, 0, 1],
+    // Mid-dark gray keeps Cubehelix's black b0 node distinct from the canvas.
+    backgroundColor: [0.2, 0.2, 0.2, 1],
   })
-  await v.attachToCanvas(canvas)
-  v.sliceType = SLICE_TYPE.RENDER
-  v.isOrientCubeVisible = false
-  return v
+  try {
+    await v.attachToCanvas(canvas)
+    v.sliceType = SLICE_TYPE.RENDER
+    v.isOrientCubeVisible = false
+    return v
+  } catch (error) {
+    v.destroy()
+    throw error
+  }
 }
 
 // Each modal owns ONE viewer, created lazily. We cache the init *promise* (not the
@@ -411,13 +439,13 @@ function renderShellRows(): void {
 
     const count = document.createElement('input')
     count.type = 'number'
-    count.min = '1'
+    count.min = '6'
     count.max = '500'
     count.step = '1'
     count.value = String(sh.count)
     count.title = 'Directions in this shell'
     count.addEventListener('input', () => {
-      genShells[i].count = Math.max(0, Math.round(count.valueAsNumber || 0))
+      genShells[i].count = Math.max(6, Math.round(count.valueAsNumber || 6))
       scheduleGenerate()
     })
 
@@ -457,10 +485,65 @@ let genRevision = 0
  *  download a DVS that disagrees with the edited form. */
 function scheduleGenerate(): void {
   genRevision++
+  cancelSchemeGeneration()
   genScheme = null
   genVecSaveBtn.disabled = true // re-enabled only when the new run completes
   clearTimeout(genTimer)
   genTimer = setTimeout(() => void runGenerate(), 250)
+}
+
+/** Put the plotted scheme's description in the footer, with the active method
+ * linked to its source/rationale. */
+function showGeneratedSchemeSummary(scheme: GenScheme): void {
+  const balancedLink = document.createElement('a')
+  balancedLink.href =
+    'https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html'
+  balancedLink.target = '_blank'
+  balancedLink.rel = 'noopener'
+  balancedLink.textContent = 'Balanced sphere'
+  const link = document.createElement('a')
+  link.href =
+    scheme.method === 'incremental'
+      ? 'http://www.emmanuelcaruyer.com/q-space-sampling.php'
+      : 'https://brainder.org/2025/05/05/15656/'
+  link.target = '_blank'
+  link.rel = 'noopener'
+  link.textContent = methodLabel(scheme.method)
+  genVecInfo.replaceChildren(
+    document.createTextNode(`${scheme.dirs.length} volumes · `),
+    balancedLink,
+    document.createTextNode(' · '),
+    link,
+    document.createTextNode(
+      ` · ${describeShells(scheme.shells)}, ${countB0(scheme)} b0`,
+    ),
+  )
+}
+
+/** Build the generator's render-only geometry. The optional antipodal mirror is
+ * preview-only (`withAntipodalNodes`); mirrored nodes are absent from
+ * `scheme.dirs`, so they can never reach the DVS. */
+function buildGeneratedPreview(scheme: GenScheme): GradientScheme {
+  const preview = buildSchemeFromSamples(scheme.dirs)
+  return genVecShowAntipodal.checked ? withAntipodalNodes(preview) : preview
+}
+
+/** Refresh only the generator mesh after a visualization-option change. */
+async function refreshGeneratedPreview(scheme: GenScheme): Promise<void> {
+  try {
+    const viewer = await getGenViewer()
+    if (!genVecDlg.open || genScheme !== scheme) return
+    await loadSchemePreview(
+      viewer,
+      buildGeneratedPreview(scheme),
+      Number(genVecScale.value),
+    )
+  } catch (err) {
+    if (genVecDlg.open && genScheme === scheme) {
+      genVecInfo.classList.add('error')
+      genVecInfo.textContent = `Could not update preview: ${(err as Error).message}`
+    }
+  }
 }
 
 /** Optimize the current settings and refresh the preview; coalesces re-entrant
@@ -477,28 +560,38 @@ async function runGenerate(): Promise<void> {
       const revision = genRevision
       genVecInfo.classList.remove('error')
       genVecInfo.textContent = 'Generating…'
-      // Yield once so the "Generating…" label paints before the synchronous,
-      // main-thread O(N²) relaxation blocks (moving it to a worker is deferred).
-      await new Promise((r) => setTimeout(r, 0))
       if (!genVecDlg.open || revision !== genRevision) continue
       try {
-        const scheme = generateScheme(genShells, {
+        const scheme = await generateSchemeInWorker(genShells, {
+          method: genVecSimultaneous.checked ? 'simultaneous' : 'incremental',
           alpha: Number(genVecAlpha.value),
           b0Every: Math.max(0, Math.round(genVecB0.valueAsNumber || 0)),
         })
+        if (!genVecDlg.open || revision !== genRevision) continue
         // Build the preview straight from the structured scheme — scheme.dirs are
         // already unit directions + bval (no bval/bvec text round-trip).
-        const preview = buildSchemeFromSamples(scheme.dirs)
+        const preview = buildGeneratedPreview(scheme)
         const genViewer = await getGenViewer()
         if (!genVecDlg.open || revision !== genRevision) continue
         await loadSchemePreview(genViewer, preview, Number(genVecScale.value))
         if (!genVecDlg.open || revision !== genRevision) continue
         genScheme = scheme
-        const nB0 = scheme.dirs.filter((d) => d.bval <= 0).length
-        const shellTxt = scheme.shells
-          .map((s) => `${s.count}×b=${s.bval}`)
-          .join(', ')
-        genVecInfo.textContent = `${scheme.dirs.length} volumes · ${shellTxt}, ${nB0} b0`
+        showGeneratedSchemeSummary(scheme)
+        const metrics = measureScheme(scheme)
+        console.info('Generated diffusion scheme QC', {
+          method: methodLabel(scheme.method),
+          volumes: scheme.dirs.length,
+          b0: countB0(scheme),
+          optimization: scheme.optimization,
+          ...metrics,
+        })
+        const balanceWarnings = findPolarityBalanceWarnings(metrics)
+        if (balanceWarnings.length > 0) {
+          console.warn(
+            'Generated diffusion scheme has unusually high per-shell polarity imbalance',
+            balanceWarnings,
+          )
+        }
         genVecSaveBtn.disabled = false
       } catch (err) {
         if (!genVecDlg.open || revision !== genRevision) continue

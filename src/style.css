@@ -302,6 +302,9 @@ footer {
 .vecdlg-hint a {
   color: var(--accent);
 }
+.vecdlg-hint.error {
+  color: #ff6b6b;
+}
 
 /* Diffusion vector-set generator: a controls sidebar + connectome preview. */
 #genVecDlg {
@@ -379,6 +382,11 @@ footer {
 }
 .genvec-params input[type="number"] {
   width: 6em;
+}
+.genvec-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .genvec-view {
   position: relative;
