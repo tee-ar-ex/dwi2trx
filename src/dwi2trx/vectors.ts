@@ -11,7 +11,7 @@
  *
  *   position   unit(dir) × bval    — b0 lands at the origin (0,0,0)
  *   radius     baseRadius × ∛N     — N identical samples ⇒ a node of N× the volume
- *   colour     bval on `viridis`   — b0 is darkest, the strongest shell brightest
+ *   colour     bval on `cubehelix` — b0 is darkest, the strongest shell brightest
  *
  * baseRadius scales with the max b-value so the balls stay visible against a
  * field of view that spans ±maxBval. Antipodal directions are kept DISTINCT on
@@ -152,9 +152,9 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
   return {
     data: { nodes, edges: [] },
     options: {
-      // viridis: perceptually-uniform dark-blue→green→yellow ramp; b=0 is the
-      // darkest, the strongest shell the brightest.
-      nodeColormap: 'viridis',
+      // Cubehelix spans black→white with monotonic luminance; the vector-viewer
+      // canvas is gray so its black b0 node remains clearly visible.
+      nodeColormap: 'cubehelix',
       nodeColormapNegative: '', // all b-values ≥ 0, no negative branch
       nodeMinColor: 0,
       nodeMaxColor: maxBval > 0 ? maxBval : 1,
@@ -186,4 +186,30 @@ export function buildGradientScheme(
     bval,
   }))
   return buildSchemeFromSamples(samples)
+}
+
+/**
+ * Return a copy of a preview scheme with every diffusion node mirrored to its
+ * antipode (at half radius), so a viewer can show whole-sphere symmetry for a
+ * half-sphere scheme. Non-mutating; b0 nodes (colorValue 0, at the origin) are
+ * not mirrored. Preview-only — these mirrored nodes are for display and must not
+ * be fed into any saved gradient scheme.
+ */
+export function withAntipodalNodes(scheme: GradientScheme): GradientScheme {
+  const antipodes = scheme.data.nodes
+    .filter((node) => node.colorValue > 0)
+    .map((node) => ({
+      ...node,
+      x: -node.x,
+      y: -node.y,
+      z: -node.z,
+      // NiiVue reads sizeValue as a radius; half it so mirrors read as secondary.
+      sizeValue: node.sizeValue * 0.5,
+    }))
+  const nodes = [...scheme.data.nodes, ...antipodes]
+  return {
+    ...scheme,
+    data: { nodes, edges: scheme.data.edges },
+    nodes: nodes.length,
+  }
 }

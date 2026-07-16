@@ -4,7 +4,11 @@
  */
 
 import assert from 'node:assert/strict'
-import { buildGradientScheme, buildSchemeFromSamples } from './vectors.ts'
+import {
+  buildGradientScheme,
+  buildSchemeFromSamples,
+  withAntipodalNodes,
+} from './vectors.ts'
 
 const approx = (a: number, b: number, eps = 1e-6) =>
   assert.ok(Math.abs(a - b) <= eps, `expected ${a} ≈ ${b}`)
@@ -39,7 +43,7 @@ const approx = (a: number, b: number, eps = 1e-6) =>
 // --- colour range spans 0..maxBval ---
 {
   const s = buildGradientScheme('0 3000', '0 1\n0 0\n0 0')
-  assert.equal(s.options.nodeColormap, 'viridis')
+  assert.equal(s.options.nodeColormap, 'cubehelix')
   assert.equal(s.options.nodeMinColor, 0)
   assert.equal(s.options.nodeMaxColor, 3000)
   assert.equal(s.options.nodeScale, 1)
@@ -121,6 +125,26 @@ const approx = (a: number, b: number, eps = 1e-6) =>
   const xnode = s.data.nodes.find((n) => n.x > 500)
   assert.ok(xnode)
   approx(xnode.x, 2000)
+}
+
+// --- withAntipodalNodes mirrors diffusion nodes (preview-only), not b0 ---
+{
+  const base = buildSchemeFromSamples([
+    { x: 0, y: 0, z: 0, bval: 0 }, // b0 at origin
+    { x: 1, y: 0, z: 0, bval: 2000 },
+    { x: 0, y: 1, z: 0, bval: 2000 },
+  ])
+  const mirrored = withAntipodalNodes(base)
+  assert.equal(base.data.nodes.length, 3) // original not mutated
+  assert.equal(mirrored.data.nodes.length, 5) // + 2 antipodes (b0 not mirrored)
+  assert.equal(mirrored.nodes, 5)
+  const x2000 = base.data.nodes.find((n) => n.x > 500)
+  assert.ok(x2000)
+  // The mirror sits at the exact antipode with half the radius.
+  const anti = mirrored.data.nodes.find((n) => n.x < -500)
+  assert.ok(anti)
+  approx(anti.x, -x2000.x)
+  approx(anti.sizeValue, x2000.sizeValue * 0.5)
 }
 
 // --- malformed inputs throw caller-facing errors ---

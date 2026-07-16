@@ -119,7 +119,7 @@
     </div>
     <div class="vecdlg-body">
       <canvas id="vecCanvas"></canvas>
-      <p class="vecdlg-hint">Drag to rotate. A b=0 sample sits at the centre (crosshair); each direction is drawn at its b-vector, out to a radius set by its b-value. Repeated samples grow as ∛N; colour (viridis) tracks the b-value. Inspecting the distribution — whole- vs half-sphere, single- vs multi-shell — is why this matters: see the <a href="https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html" target="_blank" rel="noopener">FSL eddy docs</a> and Winkler's <a href="https://brainder.org/2025/05/05/15656/" target="_blank" rel="noopener">Uniform directions for multi-shell diffusion MRI</a>.</p>
+      <p class="vecdlg-hint">Drag to rotate. A b=0 sample sits at the centre (crosshair); each direction is drawn at its b-vector, out to a radius set by its b-value. Repeated samples grow as ∛N; colour (Cubehelix) tracks the b-value. Inspecting the distribution — whole- vs half-sphere, single- vs multi-shell — is why this matters: see the <a href="https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html" target="_blank" rel="noopener">FSL eddy docs</a> and Winkler's <a href="https://brainder.org/2025/05/05/15656/" target="_blank" rel="noopener">Uniform directions for multi-shell diffusion MRI</a>.</p>
     </div>
   </dialog>
 
@@ -128,8 +128,11 @@
   <dialog id="genVecDlg" aria-label="Generate diffusion vectors">
     <div class="vecdlg-head">
       <strong>Generate diffusion vectors</strong>
-      <span class="vecdlg-info" id="genVecInfo"></span>
       <span class="vecdlg-spacer"></span>
+      <label for="genVecShowAntipodal" title="Preview the equivalent opposite direction as a smaller node; these nodes are not saved.">
+        <input type="checkbox" id="genVecShowAntipodal" />
+        Show antipodal
+      </label>
       <label for="genVecScale" title="Scale the node radii">Node size</label>
       <input type="range" id="genVecScale" min="0.2" max="4" step="0.1" value="1" title="Scale the node radii" />
       <button type="button" id="genVecSaveBtn" disabled title="Download the vector set as a Siemens .dvs file">Save DVS</button>
@@ -144,15 +147,19 @@
           <button type="button" id="genVecDelShell" class="genvec-add" title="Remove the last shell">− Remove shell</button>
         </div>
         <div class="genvec-params">
+          <label class="genvec-check" for="genVecSimultaneous" title="Checked: simultaneous Winkler optimization (α applies). Unchecked: incremental Caruyer web-tool behavior (usable truncated prefixes, no α).">
+            <input type="checkbox" id="genVecSimultaneous" checked />
+            Simultaneous optimization
+          </label>
           <label for="genVecAlpha" title="Balance per-shell uniformity (1) against whole-scheme uniformity (0)">Uniformity α: <span id="genVecAlphaVal">0.75</span></label>
-          <input type="range" id="genVecAlpha" min="0" max="1" step="0.05" value="0.75" />
+          <input type="range" id="genVecAlpha" min="0.5" max="1" step="0.05" value="0.75" />
           <label for="genVecB0" title="Insert a b0 before every N directions (0 = one leading b0 only)">b0 every</label>
           <input type="number" id="genVecB0" min="0" max="100" step="1" value="12" />
         </div>
       </div>
       <div class="genvec-view">
         <canvas id="genVecCanvas"></canvas>
-        <p class="vecdlg-hint">Directions are relaxed as charges on a sphere (each pair repelling through both antipodes), balancing separation within and across shells; the DVS scales every vector to √(b/b<sub>max</sub>). This browser heuristic is inspired by Caruyer et al.'s <a href="http://www.emmanuelcaruyer.com/q-space-sampling.php" target="_blank" rel="noopener">q-space sampling</a> and Winkler's <a href="https://brainder.org/2025/05/05/15656/" target="_blank" rel="noopener">multi-shell implementation</a>; verify coverage before scanner use.</p>
+        <p class="vecdlg-hint" id="genVecInfo">Set shell counts and b-values to generate a scheme.</p>
       </div>
     </div>
   </dialog>
