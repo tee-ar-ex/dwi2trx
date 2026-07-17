@@ -31,6 +31,17 @@ async function getModule(): Promise<NiimathModule> {
   return modulePromise
 }
 
+/** Drop the cached niimath module after a runtime abort. An Emscripten module
+ *  that has aborted (e.g. a "memory access out of bounds" on an oversized volume)
+ *  is dead — every later `callMain` throws "null function or function signature
+ *  mismatch" — so the next `getModule()` must reinstantiate a fresh instance.
+ *  Without this, an out-of-bounds in `cropFirstVolume` (the mask step) poisons the
+ *  shared module and the unmasked-fit fallback dies with the confusing second
+ *  error instead of running (or failing cleanly with the real cause). */
+function invalidateModule(): void {
+  modulePromise = null
+}
+
 let inFlight = false
 
 /**
@@ -184,7 +195,16 @@ export async function fitTensor(
 }
 
 function run(mod: NiimathModule, args: string[], step: string): void {
-  const code = mod.callMain(args)
+  let code: number
+  try {
+    code = mod.callMain(args)
+  } catch (err) {
+    // A THROW from callMain (as opposed to a non-zero return) means the WASM
+    // aborted — the module is now unusable. Drop it so the next call gets a fresh
+    // instance; without this the shared module stays poisoned across steps.
+    invalidateModule()
+    throw err
+  }
   if (code !== 0) {
     throw new Error(`niimath ${step} failed (exit ${code}).`)
   }

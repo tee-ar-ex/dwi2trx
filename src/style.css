@@ -217,7 +217,8 @@ footer {
 }
 
 /* About dialog. */
-#aboutDlg {
+#aboutDlg,
+.message-dialog {
   max-width: 32rem;
   color: var(--text);
   background: var(--panel);
@@ -226,16 +227,20 @@ footer {
   padding: 20px 24px;
   line-height: 1.5;
 }
-#aboutDlg h2 {
+#aboutDlg h2,
+.message-dialog h2 {
   margin: 0 0 8px;
 }
-#aboutDlg a {
+#aboutDlg a,
+.message-dialog a {
   color: var(--accent);
 }
-#aboutDlg button {
+#aboutDlg button,
+.message-dialog button {
   margin-top: 8px;
 }
-#aboutDlg::backdrop {
+#aboutDlg::backdrop,
+.message-dialog::backdrop {
   background: rgba(0, 0, 0, 0.55);
 }
 
@@ -326,6 +331,9 @@ footer {
 }
 #genVecDlg::backdrop {
   background: rgba(0, 0, 0, 0.55);
+}
+#genVecDlg .vecdlg-head {
+  flex-wrap: wrap;
 }
 .genvec-body {
   display: flex;

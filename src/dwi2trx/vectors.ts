@@ -9,12 +9,12 @@
  * The geometry model (matching NiiVue's connectome `extrude`, radius =
  * |sizeValue| × nodeScale, colour = colormapLookup(colorValue, min, max)):
  *
- *   position   unit(dir) × bval    — b0 lands at the origin (0,0,0)
+ *   position   unit(dir) × √(b/bmax) — b0 at 0; strongest shell at radius 1
  *   radius     baseRadius × ∛N     — N identical samples ⇒ a node of N× the volume
- *   colour     bval on `cubehelix` — b0 is darkest, the strongest shell brightest
+ *   colour     bval on `actc` — b0 and shells span NiiVue's ACTC map
  *
- * baseRadius scales with the max b-value so the balls stay visible against a
- * field of view that spans ±maxBval. Antipodal directions are kept DISTINCT on
+ * baseRadius scales with the maximum plotted length so the balls stay visible
+ * against the normalized field of view. Antipodal directions are kept DISTINCT on
  * purpose: seeing +v without −v is exactly how a half-sphere scheme reveals
  * itself. B-values are canonicalized first (below `B0_MAX_BVAL` ⇒ b0 at the
  * origin regardless of direction; otherwise snapped to `SHELL_TOL`) so acquisition
@@ -55,17 +55,23 @@ export interface GradientScheme {
   directions: number
   /** Distinct sample locations (nodes drawn). */
   nodes: number
-  /** Largest (canonical) b-value (the FOV radius). */
+  /** Largest canonical b-value (normalization reference and color maximum). */
   maxBval: number
   /** Per-shell counts, ascending by canonical b-value: `[bval, count]`. */
   shells: Array<[number, number]>
+  /** Heuristic polarity coverage from the diffusion-vector mean. */
+  coverage: 'whole sphere' | 'half sphere'
 }
 
-// A max-b=5000 scheme ⇒ a single-sample radius of 250 (≈ 1/20 of the ±5000 FOV):
+// Internal plotting policy: true reflects physical gradient amplitude
+// |g|=√(b/bmax); false gives linear normalized b/bmax radii. This affects only
+// preview geometry, never b-values, generated directions, or saved DVS files.
+const SQRT_BVALUE_PLOT = true
+// A single-sample ball spans ≈1/20 of the normalized maximum plotted radius:
 // big enough to read at a glance without swamping neighbouring directions.
 const RADIUS_DIVISOR = 20
 // Below this bvec length a direction is treated as undefined (a b0): it collapses
-// to the origin regardless, since position = unit(dir) × bval and bval ≈ 0.
+// to the origin regardless of the selected normalized b-value transform.
 const UNIT_EPS = 1e-6
 // A sample at or below this b-value is a b0 (no diffusion direction).
 const B0_MAX_BVAL = 50
@@ -88,7 +94,12 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
   for (const s of samples) maxBval = Math.max(maxBval, canonBval(s.bval))
   // maxBval 0 (an all-b0 acquisition) would give a zero radius and a degenerate
   // colour range — fall back to 1 so a single origin node still draws.
-  const baseRadius = maxBval > 0 ? maxBval / RADIUS_DIVISOR : 1
+  const baseRadius = maxBval > 0 ? 1 / RADIUS_DIVISOR : 1
+  const plotLength = (bval: number): number => {
+    if (bval <= 0 || maxBval <= 0) return 0
+    const normalized = bval / maxBval
+    return SQRT_BVALUE_PLOT ? Math.sqrt(normalized) : normalized
+  }
 
   // Merge identical samples: key on canonical b-value + unit direction, so
   // repeated b0s (all at the origin, direction ignored) and repeated directions
@@ -103,6 +114,10 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
   }
   const buckets = new Map<string, Bucket>()
   const shellCounts = new Map<number, number>()
+  let directionSumX = 0
+  let directionSumY = 0
+  let directionSumZ = 0
+  let diffusionDirections = 0
   for (const s of samples) {
     const cb = canonBval(s.bval)
     const norm = Math.hypot(s.x, s.y, s.z)
@@ -123,14 +138,20 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
       b.count++
     } else {
       buckets.set(key, {
-        x: ux * cbval,
-        y: uy * cbval,
-        z: uz * cbval,
+        x: ux * plotLength(cbval),
+        y: uy * plotLength(cbval),
+        z: uz * plotLength(cbval),
         bval: cbval,
         count: 1,
       })
     }
     shellCounts.set(cbval, (shellCounts.get(cbval) ?? 0) + 1)
+    if (!isB0) {
+      directionSumX += ux
+      directionSumY += uy
+      directionSumZ += uz
+      diffusionDirections++
+    }
   }
 
   const nodes: GradientNode[] = []
@@ -152,9 +173,7 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
   return {
     data: { nodes, edges: [] },
     options: {
-      // Cubehelix spans black→white with monotonic luminance; the vector-viewer
-      // canvas is gray so its black b0 node remains clearly visible.
-      nodeColormap: 'cubehelix',
+      nodeColormap: 'actc',
       nodeColormapNegative: '', // all b-values ≥ 0, no negative branch
       nodeMinColor: 0,
       nodeMaxColor: maxBval > 0 ? maxBval : 1,
@@ -164,6 +183,15 @@ export function buildSchemeFromSamples(samples: Sample[]): GradientScheme {
     nodes: nodes.length,
     maxBval,
     shells: [...shellCounts.entries()].sort((a, b) => a[0] - b[0]),
+    // A uniform hemisphere has mean-vector norm ≈0.5, while balanced
+    // whole-sphere sampling approaches zero. Allow finite-sample variation.
+    coverage:
+      diffusionDirections > 0 &&
+      Math.hypot(directionSumX, directionSumY, directionSumZ) /
+        diffusionDirections >
+        0.35
+        ? 'half sphere'
+        : 'whole sphere',
   }
 }
 
