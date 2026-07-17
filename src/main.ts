@@ -12,12 +12,15 @@ import {
   countB0,
   describeShells,
   findPolarityBalanceWarnings,
+  GE_DAT_MAX_DIRECTIONS,
   type GenScheme,
   measureScheme,
   methodLabel,
   type ShellSpec,
   schemeBaseName,
   schemeToDvs,
+  schemeToGeDat,
+  schemeToPhilipsTxt,
   suggestNextShell,
 } from './dwi2trx/genvectors'
 import {
@@ -25,6 +28,7 @@ import {
   generateSchemeInWorker,
 } from './dwi2trx/genvectors-worker-client'
 import { collectFiles, type ResolvedInput, resolveInput } from './dwi2trx/input'
+import { formatBytes, InputTooLargeError } from './dwi2trx/input-limits'
 // mindgrab + conform are lazily imported on first "Mask + fit" (keeps the
 // ~250 KB tinygrad model + gl-matrix out of the initial bundle, like
 // dcm2niix/niimath). Only the type is imported eagerly (erased at build).
@@ -54,7 +58,8 @@ const showVecBtn = $<HTMLButtonElement>('showVecBtn')
 const vecDlg = $<HTMLDialogElement>('vecDlg')
 const vecCanvas = $<HTMLCanvasElement>('vecCanvas')
 const vecScale = $<HTMLInputElement>('vecScale')
-const vecInfo = $<HTMLDivElement>('vecInfo')
+const vecShowAntipodal = $<HTMLInputElement>('vecShowAntipodal')
+const vecInfo = $<HTMLParagraphElement>('vecInfo')
 const genVecBtn = $<HTMLButtonElement>('genVecBtn')
 const genVecDlg = $<HTMLDialogElement>('genVecDlg')
 const genVecCanvas = $<HTMLCanvasElement>('genVecCanvas')
@@ -62,6 +67,8 @@ const genVecScale = $<HTMLInputElement>('genVecScale')
 const genVecShowAntipodal = $<HTMLInputElement>('genVecShowAntipodal')
 const genVecInfo = $<HTMLParagraphElement>('genVecInfo')
 const genVecSaveBtn = $<HTMLButtonElement>('genVecSaveBtn')
+const genVecSaveDatBtn = $<HTMLButtonElement>('genVecSaveDatBtn')
+const genVecSavePhilipsBtn = $<HTMLButtonElement>('genVecSavePhilipsBtn')
 const genVecShells = $<HTMLDivElement>('genVecShells')
 const genVecAddShell = $<HTMLButtonElement>('genVecAddShell')
 const genVecDelShell = $<HTMLButtonElement>('genVecDelShell')
@@ -84,12 +91,17 @@ const maxAngleIn = $<HTMLInputElement>('maxAngle')
 const seedDensityIn = $<HTMLInputElement>('seedDensity')
 const aboutBtn = $<HTMLButtonElement>('aboutBtn')
 const aboutDlg = $<HTMLDialogElement>('aboutDlg')
+const largeInputDlg = $<HTMLDialogElement>('largeInputDlg')
+const largeInputSummary = $<HTMLParagraphElement>('largeInputSummary')
 const faSlider = $<HTMLInputElement>('faSlider')
 const statusEl = $<HTMLDivElement>('status')
 const spinnerEl = $<HTMLSpanElement>('spinner')
 const locationEl = $<HTMLDivElement>('location')
 const dropOverlay = $<HTMLDivElement>('dropOverlay')
 const tabEls = Array.from(document.querySelectorAll<HTMLButtonElement>('.tab'))
+
+// UI fallback for a blank "b0 every" field; matches index.html.
+const DEFAULT_B0_EVERY = 12
 
 // Which volumes the canvas currently shows, so tab navigation only reloads
 // when the view actually needs to change.
@@ -101,6 +113,7 @@ let shownView: 'input' | 'maps' | 'tracts' | null = null
 // identity (bumped per new DWI). Canvas swaps are serialized separately via
 // `viewChain` (see syncView) so overlapping loadVolumes can't fight.
 let loadSeq = 0
+let inputAbortController: AbortController | null = null
 
 function setStatus(msg: string, error = false): void {
   statusEl.textContent = msg
@@ -111,6 +124,21 @@ function setStatus(msg: string, error = false): void {
  *  work (mindgrab, the dtifit fit, DICOM conversion). */
 function busy(on: boolean): void {
   spinnerEl.classList.toggle('hidden', !on)
+}
+
+/** Keep the Save-GE state and tooltip together. GE documents 6–300 rows, while
+ * over-range schemes remain available in the other formats. */
+function setSaveDatState(scheme: GenScheme | null): void {
+  const tooMany = !!scheme && scheme.dirs.length > GE_DAT_MAX_DIRECTIONS
+  genVecSaveDatBtn.disabled = !scheme || tooMany
+  genVecSaveDatBtn.title = tooMany
+    ? `GE tensor DAT supports at most ${GE_DAT_MAX_DIRECTIONS} volumes — use Siemens or Philips instead`
+    : 'Download the vector set as a GE tensor .dat file'
+}
+
+function showLargeInputDialog(error: InputTooLargeError): void {
+  largeInputSummary.textContent = `The selected files total ${formatBytes(error.actualBytes)}. This browser tool accepts at most ${formatBytes(error.limitBytes)} per dataset.`
+  if (!largeInputDlg.open) largeInputDlg.showModal()
 }
 
 /** Read a numeric input, falling back to `def` (incl. for an empty/blank field —
@@ -174,6 +202,9 @@ showVecBtn.addEventListener('click', () => {
   void showVectors()
 })
 vecScale.addEventListener('input', () => updateVecScale(Number(vecScale.value)))
+vecShowAntipodal.addEventListener('change', () => {
+  if (loadedVecScheme) void refreshLoadedPreview(loadedVecScheme)
+})
 genVecBtn.addEventListener('click', () => {
   void openGenVectors()
 })
@@ -216,11 +247,25 @@ genVecDlg.addEventListener('close', () => {
   genPending = false
   genScheme = null
   genVecSaveBtn.disabled = true
+  genVecSavePhilipsBtn.disabled = true
+  setSaveDatState(null)
 })
 genVecSaveBtn.addEventListener('click', () => {
   if (!genScheme) return
   const name = `DiffusionVectors_${schemeBaseName(genScheme.shells)}.dvs`
   download(new Blob([schemeToDvs(genScheme)], { type: 'text/plain' }), name)
+})
+genVecSaveDatBtn.addEventListener('click', () => {
+  if (!genScheme) return
+  const name = `tensor_${schemeBaseName(genScheme.shells)}.dat`
+  download(new Blob([schemeToGeDat(genScheme)], { type: 'text/plain' }), name)
+})
+genVecSavePhilipsBtn.addEventListener('click', () => {
+  if (!genScheme) return
+  download(
+    new Blob([schemeToPhilipsTxt(genScheme)], { type: 'text/plain' }),
+    'dti_vectors_input.txt',
+  )
 })
 function download(blob: Blob, name: string): void {
   const url = URL.createObjectURL(blob)
@@ -259,8 +304,12 @@ faSlider.addEventListener('input', () => {
 async function makeRenderViewer(canvas: HTMLCanvasElement): Promise<NiiVueGPU> {
   const v = new NiiVueGPU({
     isDragDropEnabled: false,
-    // Mid-dark gray keeps Cubehelix's black b0 node distinct from the canvas.
+    // Mid-dark gray gives ACTC nodes and the origin crosshair clear contrast.
     backgroundColor: [0.2, 0.2, 0.2, 1],
+    // Vector coordinates are normalized to a maximum radius of 1. NiiVue's
+    // anatomical defaults (width 1, gap 10) would engulf the graph origin.
+    crosshairWidth: 0.01,
+    crosshairGap: 0.05,
   })
   try {
     await v.attachToCanvas(canvas)
@@ -387,6 +436,45 @@ function makeNodeScaleUpdater(
 const updateVecScale = makeNodeScaleUpdater(() => vecViewerPromise)
 const updateGenScale = makeNodeScaleUpdater(() => genViewerPromise)
 
+let loadedVecScheme: GradientScheme | null = null
+
+function buildLoadedPreview(scheme: GradientScheme): GradientScheme {
+  return vecShowAntipodal.checked ? withAntipodalNodes(scheme) : scheme
+}
+
+function showLoadedSchemeSummary(scheme: GradientScheme): void {
+  const shellTxt = scheme.shells.map(([b, n]) => `b=${b}×${n}`).join(', ')
+  const coverageLink = document.createElement('a')
+  coverageLink.href =
+    'https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html'
+  coverageLink.target = '_blank'
+  coverageLink.rel = 'noopener'
+  coverageLink.textContent = scheme.coverage
+  vecInfo.replaceChildren(
+    document.createTextNode(
+      `${scheme.directions} directions · ${scheme.nodes} unique · ${shellTxt} `,
+    ),
+    coverageLink,
+  )
+}
+
+async function refreshLoadedPreview(scheme: GradientScheme): Promise<void> {
+  try {
+    const viewer = await getVecViewer()
+    if (!vecDlg.open || loadedVecScheme !== scheme) return
+    await loadSchemePreview(
+      viewer,
+      buildLoadedPreview(scheme),
+      Number(vecScale.value),
+    )
+  } catch (err) {
+    if (vecDlg.open && loadedVecScheme === scheme) {
+      vecInfo.classList.add('error')
+      vecInfo.textContent = `Could not update preview: ${(err as Error).message}`
+    }
+  }
+}
+
 async function showVectors(): Promise<void> {
   const input = state.input
   if (!input || vecDlg.open) return // ignore a double-click while already open
@@ -406,12 +494,18 @@ async function showVectors(): Promise<void> {
       return
     }
     const scheme = buildGradientScheme(bvalText, bvecText)
-    const shellTxt = scheme.shells.map(([b, n]) => `b=${b}×${n}`).join(', ')
-    vecInfo.textContent = `${scheme.directions} directions · ${scheme.nodes} unique · ${shellTxt}`
+    loadedVecScheme = scheme
+    vecInfo.classList.remove('error')
+    showLoadedSchemeSummary(scheme)
     const viewer = await getVecViewer()
     if (seq !== loadSeq || !vecDlg.open) return
-    await loadSchemePreview(viewer, scheme, Number(vecScale.value))
+    await loadSchemePreview(
+      viewer,
+      buildLoadedPreview(scheme),
+      Number(vecScale.value),
+    )
   } catch (err) {
+    loadedVecScheme = null
     vecDlg.close()
     setStatus(`Could not show vectors: ${(err as Error).message}`, true)
   }
@@ -419,7 +513,7 @@ async function showVectors(): Promise<void> {
 
 // --- Diffusion vector-set generator ---
 // Optimize uniform multi-shell directions (antipodal electrostatic repulsion),
-// preview them in the shared connectome viewer, and save a Siemens DVS. A
+// preview them in the shared connectome viewer, and save scanner vector files. A
 // standalone tool — needs no loaded DWI.
 let genScheme: GenScheme | null = null
 // The editable shell list (directions × b-value). Rendered as rows in the modal.
@@ -488,6 +582,8 @@ function scheduleGenerate(): void {
   cancelSchemeGeneration()
   genScheme = null
   genVecSaveBtn.disabled = true // re-enabled only when the new run completes
+  genVecSavePhilipsBtn.disabled = true
+  setSaveDatState(null)
   clearTimeout(genTimer)
   genTimer = setTimeout(() => void runGenerate(), 250)
 }
@@ -565,7 +661,8 @@ async function runGenerate(): Promise<void> {
         const scheme = await generateSchemeInWorker(genShells, {
           method: genVecSimultaneous.checked ? 'simultaneous' : 'incremental',
           alpha: Number(genVecAlpha.value),
-          b0Every: Math.max(0, Math.round(genVecB0.valueAsNumber || 0)),
+          // Blank fields use the UI default; an explicit 0 means leading b0 only.
+          b0Every: Math.round(num(genVecB0, DEFAULT_B0_EVERY, 0, 100)),
         })
         if (!genVecDlg.open || revision !== genRevision) continue
         // Build the preview straight from the structured scheme — scheme.dirs are
@@ -593,10 +690,14 @@ async function runGenerate(): Promise<void> {
           )
         }
         genVecSaveBtn.disabled = false
+        genVecSavePhilipsBtn.disabled = false
+        setSaveDatState(scheme)
       } catch (err) {
         if (!genVecDlg.open || revision !== genRevision) continue
         genScheme = null
         genVecSaveBtn.disabled = true
+        genVecSavePhilipsBtn.disabled = true
+        setSaveDatState(null)
         genVecInfo.classList.add('error')
         genVecInfo.textContent = (err as Error).message
       }
@@ -650,10 +751,21 @@ filePicker.addEventListener('change', () => {
   filePicker.value = '' // let the user re-pick the same files
 })
 
-/** Load a DWI from a promise of File[] (drop walk or file picker), through the
- *  same validate-then-display path. */
+/**
+ * Claim identity for a load. Keep abort-before-increment centralized here so a
+ * superseded dcm2niix worker cannot outlive the sequence that owns it.
+ */
+function beginLoad(): { seq: number; controller: AbortController } {
+  inputAbortController?.abort(
+    new DOMException('Superseded by a newer input.', 'AbortError'),
+  )
+  const controller = new AbortController()
+  inputAbortController = controller
+  return { seq: ++loadSeq, controller }
+}
+
 async function loadInputFiles(filesPromise: Promise<File[]>): Promise<void> {
-  const seq = ++loadSeq
+  const { seq, controller } = beginLoad()
   // A new load relocks tabs 2–3 and invalidates any downstream progress.
   state.input = undefined
   state.maps = undefined
@@ -662,7 +774,7 @@ async function loadInputFiles(filesPromise: Promise<File[]>): Promise<void> {
   busy(true)
   setStatus('Loading…')
   try {
-    const resolved = await resolveInput(await filesPromise)
+    const resolved = await resolveInput(await filesPromise, controller.signal)
     await loadInput(
       resolved,
       resolved.source,
@@ -670,8 +782,12 @@ async function loadInputFiles(filesPromise: Promise<File[]>): Promise<void> {
       resolved.source === 'dicom' ? 'DICOM → DWI' : 'DWI',
     )
   } catch (err) {
-    if (seq === loadSeq) setStatus((err as Error).message, true)
+    if (seq === loadSeq) {
+      if (err instanceof InputTooLargeError) showLargeInputDialog(err)
+      setStatus((err as Error).message, true)
+    }
   } finally {
+    if (inputAbortController === controller) inputAbortController = null
     if (seq === loadSeq) busy(false)
   }
 }
@@ -680,19 +796,28 @@ async function loadInputFiles(filesPromise: Promise<File[]>): Promise<void> {
 // Init inside try/catch: a browser without WebGPU throws here, and we want a
 // clear message instead of a blank page with a stale "Loading…" status.
 let nv: NiiVueGPU
+// The drop/picker handlers are live before this finishes, and a user load during
+// startup is now a SUPPORTED path (it suppresses the bundled sample), so the
+// display path must wait for the attach + slice-type/render config below rather
+// than racing it. `doSyncView` awaits this; the constructor itself is sync, so
+// `nv` is assigned (no TDZ) even while the attach is pending.
+let nvReady: Promise<void> = Promise.resolve()
 try {
   nv = new NiiVueGPU({
     isDragDropEnabled: false, // we handle drops to drive the tabs
     backgroundColor: [0, 0, 0, 1],
     isSnapToVoxelCenters: true, // crisp V1 direction lines (per vox.modulate)
   })
-  await nv.attachTo('gl1')
-  nv.sliceType = SLICE_TYPE.MULTIPLANAR
-  nv.showRender = SHOW_RENDER.AUTO
-  // Live voxel readout in the footer (location + per-volume intensity).
-  nv.addEventListener('locationChange', (loc) => {
-    locationEl.textContent = (loc as { string?: string })?.string ?? ''
-  })
+  nvReady = (async () => {
+    await nv.attachTo('gl1')
+    nv.sliceType = SLICE_TYPE.MULTIPLANAR
+    nv.showRender = SHOW_RENDER.AUTO
+    // Live voxel readout in the footer (location + per-volume intensity).
+    nv.addEventListener('locationChange', (loc) => {
+      locationEl.textContent = (loc as { string?: string })?.string ?? ''
+    })
+  })()
+  await nvReady
 } catch (err) {
   setStatus(
     `WebGPU unavailable — dwi2trx needs a recent desktop Chrome or Edge. (${(err as Error).message})`,
@@ -838,7 +963,20 @@ async function runFit(): Promise<void> {
     )
   } catch (err) {
     if (seq === loadSeq) {
-      setStatus(`Tensor fit failed: ${(err as Error).message}`, true)
+      const msg = (err as Error)?.message ?? String(err)
+      // A WebAssembly out-of-bounds / null-function / OOM here means the volume
+      // exceeded the in-browser memory ceiling mid-fit (a sub-2 GB .nii.gz can
+      // still decompress past it). Give the real cause, not the cryptic WASM string.
+      const outOfMemory =
+        /out of bounds|null function|out of memory|allocation failed|table index/i.test(
+          msg,
+        )
+      setStatus(
+        outOfMemory
+          ? 'This dataset is too large for in-browser tensor fitting — a WebAssembly memory limit was reached. Try a cropped or lower-resolution acquisition, or a native pipeline.'
+          : `Tensor fit failed: ${msg}`,
+        true,
+      )
     }
   } finally {
     fitting = false
@@ -1045,6 +1183,11 @@ function navSync(): void {
 }
 
 async function doSyncView(): Promise<void> {
+  // A drop can land while WebGPU is still initializing (the handlers are live
+  // first). Wait for the attach + sliceType/showRender config before touching the
+  // canvas, or that load renders against an unattached viewer with default
+  // settings. Resolved after startup, so this is free on every later swap.
+  await nvReady
   // A new input bumps loadSeq; a swap that finishes after that must NOT record
   // its (now-stale) view, or the string dedup would skip the new input's load.
   const seq = loadSeq
@@ -1167,7 +1310,7 @@ async function fetchAsFile(url: string): Promise<File> {
 }
 
 async function loadSample(): Promise<void> {
-  const seq = ++loadSeq
+  const { seq, controller } = beginLoad()
   busy(true)
   setStatus('Loading sample…')
   try {
@@ -1177,15 +1320,18 @@ async function loadSample(): Promise<void> {
       fetchAsFile(`${base}dwi.bval`),
       fetchAsFile(`${base}dwi.bvec`),
     ])
-    const resolved = await resolveInput([nii, bval, bvec])
+    const resolved = await resolveInput([nii, bval, bvec], controller.signal)
     await loadInput(resolved, 'sample', seq, 'Sample DWI')
   } catch (err) {
     if (seq === loadSeq)
       setStatus(`Failed to load sample: ${(err as Error).message}`, true)
   } finally {
+    if (inputAbortController === controller) inputAbortController = null
     if (seq === loadSeq) busy(false)
   }
 }
 
-await loadSample()
+// Explicit user input may arrive while WebGPU initializes; never replace it with
+// the bundled example once initialization completes.
+if (loadSeq === 0) await loadSample()
 render()

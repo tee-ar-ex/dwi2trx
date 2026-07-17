@@ -39,6 +39,8 @@ export interface RunDcm2niixOptions {
    * BIDS sidecars and other dcm2niix outputs are dropped. Default: `true`.
    */
   niftiOnly?: boolean
+  /** Stop an obsolete conversion and release its worker/WASM heap. */
+  signal?: AbortSignal
 }
 
 /**
@@ -59,17 +61,35 @@ export async function runDcm2niix(
   files: FileList | File[] | null | undefined,
   options: RunDcm2niixOptions = {},
 ): Promise<File[]> {
-  const { niftiOnly = true } = options
+  const { niftiOnly = true, signal } = options
   if (!files || files.length === 0) return []
 
   const dcm2niix = new Dcm2niix()
+  let abortListener: (() => void) | undefined
+  // Register before init(): Dcm2niix creates its worker synchronously, so an abort
+  // during WASM boot can terminate it immediately.
+  const aborted = signal
+    ? new Promise<never>((_, reject) => {
+        abortListener = () => {
+          dcm2niix.worker?.terminate()
+          // `reason` is always set by abort(); the default is an AbortError.
+          reject(signal.reason)
+        }
+        signal.addEventListener('abort', abortListener, { once: true })
+      })
+    : null
   try {
-    await dcm2niix.init()
-    const result = (await dcm2niix.input(files).run()) as File[]
+    signal?.throwIfAborted()
+    await (aborted ? Promise.race([dcm2niix.init(), aborted]) : dcm2niix.init())
+    const conversion = dcm2niix.input(files).run() as Promise<File[]>
+    const result = aborted
+      ? await Promise.race([conversion, aborted])
+      : await conversion
     return niftiOnly
       ? result.filter((f) => /\.nii(\.gz)?$/i.test(f.name))
       : result
   } finally {
+    if (abortListener) signal?.removeEventListener('abort', abortListener)
     dcm2niix.worker?.terminate()
   }
 }

@@ -15,7 +15,8 @@
  *       direction at a time, earlier ones fixed. Shell selection matches
  *       `multishell.py::next_shell`, but placement is ALPHA-FREE (every prior
  *       direction repels equally) — matching Caruyer's web tool, NOT
- *       multishell.py's α-weighted incremental. Keeps every prefix usable.
+ *       multishell.py's α-weighted incremental. Its acquisition order is
+ *       preserved so truncated prefixes retain useful angular coverage.
  *
  * Neither is a certified optimum — treat the output as a good starting scheme to
  * VERIFY, not a validated protocol.
@@ -106,6 +107,9 @@ const SOFTENING_INCR = 1e-9
 // Worker, but this cap still bounds latency and memory for accidental inputs.
 export const MAX_TOTAL_DIRECTIONS = 1000
 export const MIN_DIRECTIONS_PER_SHELL = 6
+/** GE custom tensor tables document 6–300 rows per direction-count block. */
+export const GE_DAT_MIN_DIRECTIONS = 6
+export const GE_DAT_MAX_DIRECTIONS = 300
 
 function finiteOption(
   value: number | undefined,
@@ -738,11 +742,99 @@ function orientFirstDirectionToDiagonal(dirs: GenDir[]): GenDir[] {
   return rotated
 }
 
+/** Deterministically order an already-optimized direction set for scanner duty
+ * cycle. Shells are scheduled by proportional deficit, while directions within
+ * the selected shell minimize overlap with an exponentially decayed history of
+ * squared per-axis gradient demand. Squared demand reflects coil heating:
+ * |g|²=b/bmax. The fixed first direction and the direction set are unchanged. */
+export function orderForDutyCycle(dirs: GenDir[], maxBval: number): GenDir[] {
+  if (dirs.length < 2) return dirs.map((dir) => ({ ...dir }))
+  if (!Number.isFinite(maxBval) || maxBval <= 0)
+    throw new Error('Maximum b-value must be positive and finite.')
+
+  const remaining = dirs.slice(1).map((dir, index) => ({ dir, index }))
+  const totals = new Map<number, number>()
+  for (const dir of dirs) totals.set(dir.bval, (totals.get(dir.bval) ?? 0) + 1)
+  const placed = new Map<number, number>([[dirs[0].bval, 1]])
+  const ordered = [{ ...dirs[0] }]
+  const demand = (dir: GenDir): [number, number, number] => {
+    const scale2 = dir.bval / maxBval
+    return [
+      scale2 * dir.x * dir.x,
+      scale2 * dir.y * dir.y,
+      scale2 * dir.z * dir.z,
+    ]
+  }
+  let recent = demand(dirs[0])
+
+  while (remaining.length > 0) {
+    const nextPosition = ordered.length + 1
+    let selectedShell = remaining[0].dir.bval
+    let largestDeficit = -Infinity
+    for (const bval of totals.keys()) {
+      if (!remaining.some((candidate) => candidate.dir.bval === bval)) continue
+      const expected = (nextPosition * (totals.get(bval) ?? 0)) / dirs.length
+      const deficit = expected - (placed.get(bval) ?? 0)
+      if (deficit > largestDeficit + 1e-12) {
+        largestDeficit = deficit
+        selectedShell = bval
+      }
+    }
+
+    let bestRemainingIndex = -1
+    let bestScore = Infinity
+    let bestOriginalIndex = Infinity
+    for (let i = 0; i < remaining.length; i++) {
+      const candidate = remaining[i]
+      if (candidate.dir.bval !== selectedShell) continue
+      const load = demand(candidate.dir)
+      const score =
+        recent[0] * load[0] + recent[1] * load[1] + recent[2] * load[2]
+      if (
+        score < bestScore - 1e-15 ||
+        (Math.abs(score - bestScore) <= 1e-15 &&
+          candidate.index < bestOriginalIndex)
+      ) {
+        bestRemainingIndex = i
+        bestScore = score
+        bestOriginalIndex = candidate.index
+      }
+    }
+
+    // Public callers may bypass generateScheme's normalized shell inputs.
+    if (bestRemainingIndex < 0) {
+      throw new Error(
+        'Direction b-values must be finite to order by duty cycle.',
+      )
+    }
+    const [chosen] = remaining.splice(bestRemainingIndex, 1)
+    ordered.push({ ...chosen.dir })
+    placed.set(selectedShell, (placed.get(selectedShell) ?? 0) + 1)
+    const load = demand(chosen.dir)
+    recent = [
+      recent[0] * 0.5 + load[0],
+      recent[1] * 0.5 + load[1],
+      recent[2] * 0.5 + load[2],
+    ]
+  }
+  return ordered
+}
+
 /**
- * Generate a full ordered scheme: relax the directions, spread each shell across
- * the sequence by phase (avoiding a long single-shell tail), and insert b0s (one
- * leading, then one before every `b0Every` directions). This ordering balances
- * shell counts; it does not optimize the angular coverage of arbitrary prefixes.
+ * Generate a full ordered scheme: relax the directions, mix shells, balance
+ * polarity, orient the first direction, optionally duty-cycle-order simultaneous
+ * output, and insert b0s.
+ *
+ * ORDERING TRADE-OFF (the two methods deliberately differ — do not unify):
+ * `orderForDutyCycle` schedules by proportional shell deficit and per-axis heat;
+ * it does NOT optimize the angular coverage of arbitrary prefixes, so a truncated
+ * *simultaneous* scan has no coverage guarantee. That is an acceptable price there
+ * (simultaneous optimizes the whole set), but it is fatal for *incremental*, whose
+ * only reason to exist is usable prefixes: running the duty sorter over incremental
+ * output measured a 6-direction prefix collapsing ~51° → ~17° min separation. Hence
+ * incremental keeps construction order and is NOT duty-cycle ordered. If you ever
+ * want duty ordering for incremental too, you must first bound how far it may
+ * permute, and re-measure prefix separation.
  */
 export function generateScheme(
   shells: ShellSpec[],
@@ -778,12 +870,16 @@ export function generateScheme(
 
   let interleaved: GenDir[]
   if (method === 'incremental') {
-    // Incremental generation already produces the acquisition order. Reordering
-    // would discard its central guarantee that useful coverage exists in prefixes.
+    // Preserve Caruyer's construction order: reordering would discard the mode's
+    // defining benefit that truncated prefixes retain useful angular coverage.
     interleaved = relaxed
   } else {
-    // Simultaneous output is grouped by shell; interleave it by fractional phase
-    // so each shell is spread uniformly through the acquisition order.
+    // Simultaneous output is grouped by shell; interleave it by fractional phase.
+    // NOTE this no longer sets the acquisition order — `orderForDutyCycle` below
+    // re-schedules shells from scratch by proportional deficit. What survives is
+    // (a) which direction lands at index 0 (the anchor `orientFirstDirectionToDiagonal`
+    // rotates to the diagonal, and the one seed the duty sorter keeps fixed) and
+    // (b) the `candidate.index` tie-break. Keep it for those; don't expect more.
     const byShell: GenDir[][] = clean.map(() => [])
     let idx = 0
     clean.forEach((sh, si) => {
@@ -803,18 +899,20 @@ export function generateScheme(
   const oriented = orientFirstDirectionToDiagonal(
     balancePolarities(interleaved),
   )
+  const maxBval = Math.max(...clean.map((s) => s.bval))
+  const ordered =
+    method === 'incremental' ? oriented : orderForDutyCycle(oriented, maxBval)
   const b0Every = Math.max(
     0,
     Math.round(finiteOption(opts.b0Every, 0, 'b0 interval')),
   )
   const makeB0 = (): GenDir => ({ x: 0, y: 0, z: 0, bval: 0 })
   const dirs: GenDir[] = [makeB0()] // always a leading b0
-  oriented.forEach((d, i) => {
+  ordered.forEach((d, i) => {
     if (b0Every > 0 && i > 0 && i % b0Every === 0) dirs.push(makeB0())
     dirs.push(d)
   })
 
-  const maxBval = Math.max(...clean.map((s) => s.bval))
   return {
     dirs,
     maxBval,
@@ -947,18 +1045,13 @@ export function measureScheme(scheme: GenScheme): SchemeMetrics {
  * |g| = √(b/b_max) so its length encodes the shell's diffusion weighting.
  */
 export function schemeToDvs(scheme: GenScheme): string {
-  if (!Number.isFinite(scheme.maxBval) || scheme.maxBval <= 0)
-    throw new Error('Maximum b-value must be positive and finite.')
-  for (const d of scheme.dirs) {
-    if (![d.x, d.y, d.z, d.bval].every(Number.isFinite))
-      throw new Error('DVS directions must contain only finite numbers.')
-    if (d.bval < 0) throw new Error('DVS b-values cannot be negative.')
-  }
-  const bmax = scheme.maxBval > 0 ? scheme.maxBval : 1
+  validateSchemeForSerialization(scheme)
+  const bmax = scheme.maxBval
   const nB0 = countB0(scheme)
   const lines: string[] = [
     `# Diffusion vector set generated by dwi2trx — ${describeShells(scheme.shells)}${nB0 ? `, ${nB0} b0` : ''}.`,
     `# ${methodLabel(scheme.method)} antipodal electrostatic-repulsion relaxation.`,
+    `# ${orderingDescription(scheme.method)}`,
     '# Polarity-balanced whole-sphere sampling for FSL Eddy:',
     '# https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html',
     '# Verify coverage before scanner use.',
@@ -967,13 +1060,104 @@ export function schemeToDvs(scheme: GenScheme): string {
     'normalisation = none',
   ]
   scheme.dirs.forEach((d, i) => {
-    const g = d.bval > 0 ? Math.sqrt(d.bval / bmax) : 0
-    const x = (d.x * g).toFixed(6)
-    const y = (d.y * g).toFixed(6)
-    const z = (d.z * g).toFixed(6)
+    const [x, y, z] = scaledComponents(d, bmax)
     lines.push(`Vector[${i}]  = (${x}, ${y}, ${z})`)
   })
   return `${lines.join('\n')}\n`
+}
+
+function validateSchemeForSerialization(scheme: GenScheme): void {
+  if (!Number.isFinite(scheme.maxBval) || scheme.maxBval <= 0)
+    throw new Error('Maximum b-value must be positive and finite.')
+  if (scheme.dirs.length === 0)
+    throw new Error('A scheme must contain at least one volume.')
+  for (const d of scheme.dirs) {
+    if (![d.x, d.y, d.z, d.bval].every(Number.isFinite))
+      throw new Error('Directions must contain only finite numbers.')
+    if (d.bval < 0) throw new Error('Direction b-values cannot be negative.')
+    // Both formats encode weighting as |g| = √(b/b_max), so b > b_max would emit
+    // |g| > 1 — which the GE spec forbids and no scanner can deliver.
+    if (d.bval > scheme.maxBval)
+      throw new Error('Direction b-values cannot exceed the maximum b-value.')
+  }
+}
+
+function scaledComponents(d: GenDir, bmax: number): [string, string, string] {
+  const g = d.bval > 0 ? Math.sqrt(d.bval / bmax) : 0
+  return [(d.x * g).toFixed(6), (d.y * g).toFixed(6), (d.z * g).toFixed(6)]
+}
+
+function orderingDescription(method: GenMethod): string {
+  return method === 'incremental'
+    ? 'Incremental construction order preserved for useful truncated prefixes.'
+    : 'Duty-cycle-balanced ordering: shells mixed; recent X/Y/Z demand minimized.'
+}
+
+/** Serialize one GE custom tensor table. GE encodes effective b-value in vector
+ * magnitude: b_effective=b_max*(x²+y²+z²). Fields are SPACE-separated for
+ * compatibility with software before 29.1; every line ends with LF (0x0A). */
+export function schemeToGeDat(scheme: GenScheme): string {
+  validateSchemeForSerialization(scheme)
+  if (
+    scheme.dirs.length < GE_DAT_MIN_DIRECTIONS ||
+    scheme.dirs.length > GE_DAT_MAX_DIRECTIONS
+  ) {
+    throw new Error(
+      `GE tensor DAT requires ${GE_DAT_MIN_DIRECTIONS}–${GE_DAT_MAX_DIRECTIONS} volumes.`,
+    )
+  }
+  const nB0 = countB0(scheme)
+  const lines: string[] = [
+    '# Multi-shell tensor file generated by dwi2trx',
+    '# Diffusion gradient vectors for GE scanners',
+    '# GE logical coordinates: X=frequency, Y=phase, Z=slice',
+    `# Set the console maximum b-value to ${scheme.maxBval} s/mm2`,
+    `# Diffusion tab: number of directions (TENSOR): ${scheme.dirs.length}`,
+    `# ${describeShells(scheme.shells)}${nB0 ? `, ${nB0} b0` : ''}`,
+    `# ${methodLabel(scheme.method)} antipodal electrostatic-repulsion relaxation`,
+    `# ${orderingDescription(scheme.method)}`,
+    '# Rename to tensorNNNN.dat and select NNNN with CV11',
+    '#',
+    String(scheme.dirs.length),
+  ]
+  for (const d of scheme.dirs)
+    lines.push(scaledComponents(d, scheme.maxBval).join(' '))
+  return `${lines.join('\n')}\n`
+}
+
+/**
+ * Philips `dti_vectors_input.txt`: unit x/y/z plus the explicit b-value — Philips
+ * carries b in its own column, so do NOT amplitude-scale like the Siemens/GE
+ * writers above.
+ *
+ * Two rules from dcm2niix `Philips/README.md` are enforced below: a b=0 row must be
+ * FIRST, and repeated b0s must each specify a UNIQUE direction (spaced around the
+ * XY circle) — a zero-vector b0 is not a documented form. The header is optional and
+ * omitted. NOTE the README's example is TAB-separated and LF-terminated; the 3-space
+ * + CRLF form here is unverified (no source states a separator/EOL rule — the
+ * console is Windows, so CRLF is a safe guess, not a spec). Per that README these
+ * custom files only work with Philips FiberTrak when every b-value shares the same
+ * directions, which a per-shell-optimized scheme never does.
+ */
+export function schemeToPhilipsTxt(scheme: GenScheme): string {
+  validateSchemeForSerialization(scheme)
+  if (scheme.dirs[0].bval !== 0)
+    throw new Error('Philips vector tables must start with a b=0 volume.')
+  const component = (value: number): string =>
+    (Math.abs(value) < 0.5e-6 ? 0 : value).toFixed(6)
+  const b0Count = countB0(scheme)
+  let b0Index = 0
+  const lines = scheme.dirs.map((dir) => {
+    if (dir.bval === 0) {
+      const angle = (2 * Math.PI * b0Index++) / b0Count
+      return `${component(Math.cos(angle))}   ${component(Math.sin(angle))}   0.000000   0`
+    }
+    const length = Math.hypot(dir.x, dir.y, dir.z)
+    if (length <= Number.EPSILON)
+      throw new Error('Philips diffusion directions must be non-zero.')
+    return `${component(dir.x / length)}   ${component(dir.y / length)}   ${component(dir.z / length)}   ${dir.bval}`
+  })
+  return `${lines.join('\r\n')}\r\n`
 }
 
 /** A filename-safe descriptor of the scheme, e.g. `30x1000_30x2000`. */

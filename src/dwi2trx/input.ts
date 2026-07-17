@@ -8,6 +8,11 @@
  */
 
 import { traverseDataTransferItems } from './files'
+import {
+  assertInputSize,
+  InputTooLargeError,
+  MAX_INPUT_BYTES,
+} from './input-limits'
 import type { DwiInput } from './state'
 import {
   baseName,
@@ -19,12 +24,10 @@ import {
   isNifti,
 } from './validate'
 
-// ponytail: sanity caps so a stray huge folder can't read gigabytes into JS/WASM
-// memory before we refuse. Generous — real DWI studies are well under these.
-// The byte cap is a backstop only; the real fix for large inputs janking the
-// main-thread WASM is a worker (deferred).
+// Sanity cap so a stray huge folder can't be walked into memory before we refuse.
+// Generous — real DWI studies are well under it. The companion BYTE cap now lives
+// in `input-limits.ts` (`assertInputSize`), which every entry path calls.
 const MAX_FILES = 20000
-const MAX_BYTES = 2_000_000_000 // 2 GB total across the drop
 
 /** Resolved, fully-validated triple (volume count already cross-checked). */
 export type ResolvedInput = Omit<DwiInput, 'source'> & {
@@ -58,12 +61,7 @@ export async function collectFiles(dt: DataTransfer): Promise<File[]> {
       `Too many files (${files.length}). Drop a single DWI study (limit ${MAX_FILES}).`,
     )
   }
-  const totalBytes = files.reduce((sum, f) => sum + f.size, 0)
-  if (totalBytes > MAX_BYTES) {
-    throw new Error(
-      `Input too large (${Math.round(totalBytes / 1e6)} MB, limit ${MAX_BYTES / 1e6} MB).`,
-    )
-  }
+  assertInputSize(files)
   return files
 }
 
@@ -72,25 +70,29 @@ export async function collectFiles(dt: DataTransfer): Promise<File[]> {
  * a NIfTI+bval+bvec drop; otherwise convert with dcm2niix and pick the
  * diffusion series. Throws a caller-facing Error on any problem.
  */
-export async function resolveInput(files: File[]): Promise<ResolvedInput> {
+export async function resolveInput(
+  files: File[],
+  signal?: AbortSignal,
+): Promise<ResolvedInput> {
+  // File-picker inputs do not pass through collectFiles, so this must remain the
+  // authoritative check shared by every entry path.
+  assertInputSize(files)
+  signal?.throwIfAborted()
   if (files.some((f) => isNifti(f.name))) {
     return resolveTriple(files, 'nifti')
   }
   // DICOM path: pull in dcm2niix only now (keeps its worker/glue out of the
   // initial payload). niftiOnly:false keeps the bval/bvec/json sidecars.
   const { runDcm2niix } = await import('../niivue-ext/dcm2niix/index')
-  const converted = await runDcm2niix(files, { niftiOnly: false })
+  const converted = await runDcm2niix(files, { niftiOnly: false, signal })
   if (converted.length === 0) {
     throw new Error('dcm2niix produced no output — not a valid DICOM set.')
   }
   // The converted NIfTI can exceed the input bytes (DICOM is often compressed);
   // re-check the cap before this feeds display + the main-thread tensor fit.
   const convertedBytes = converted.reduce((sum, f) => sum + f.size, 0)
-  if (convertedBytes > MAX_BYTES) {
-    throw new Error(
-      `Converted DICOM too large (${Math.round(convertedBytes / 1e6)} MB, limit ${MAX_BYTES / 1e6} MB).`,
-    )
-  }
+  if (convertedBytes > MAX_INPUT_BYTES)
+    throw new InputTooLargeError(convertedBytes)
   return resolveTriple(converted, 'dicom')
 }
 
