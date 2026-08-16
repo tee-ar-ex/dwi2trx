@@ -29,10 +29,6 @@ import {
 } from './dwi2trx/genvectors-worker-client'
 import { collectFiles, type ResolvedInput, resolveInput } from './dwi2trx/input'
 import { formatBytes, InputTooLargeError } from './dwi2trx/input-limits'
-// mindgrab + conform are lazily imported on first "Mask + fit" (keeps the
-// ~250 KB tinygrad model + gl-matrix out of the initial bundle, like
-// dcm2niix/niimath). Only the type is imported eagerly (erased at build).
-import type { MindgrabInferer } from './dwi2trx/mindgrab'
 import {
   type InputSource,
   type Step,
@@ -826,75 +822,30 @@ try {
   throw err
 }
 
-// Extension context for the mindgrab conform step (256³ FreeSurfer-canonical).
-// The `conform` transform + the mindgrab model are registered/loaded lazily on
-// first "Mask + fit" so the heavy code stays out of the initial bundle.
-const maskCtx = nv.createExtensionContext()
-
-// mindgrab device + model, loaded once on first "Mask + fit". `maskDevice` is
-// undefined until tried, null if WebGPU/shader-f16 is unavailable.
-let maskDevice: GPUDevice | null | undefined
-let maskInferer: MindgrabInferer | null = null
-let conformRegistered = false
-
-async function getMaskInferer(): Promise<MindgrabInferer | null> {
-  const { getBrainGPUDevice, loadMindgrab } = await import('./dwi2trx/mindgrab')
-  if (maskDevice === undefined) maskDevice = await getBrainGPUDevice()
-  if (!maskDevice) return null
-  if (!conformRegistered) {
-    const { conform } = await import('./niivue-ext/image-processing/transforms')
-    maskCtx.registerVolumeTransform(conform)
-    conformRegistered = true
-  }
-  if (!maskInferer) {
-    maskInferer = await loadMindgrab(
-      maskDevice,
-      `${import.meta.env.BASE_URL}models/net_mindgrab.safetensors`,
-    )
-  }
-  return maskInferer
-}
-
-/** Release mindgrab's ~1.4 GB GPU device + model buffers so the tracker can
- *  allocate its own (a second resident device risks OOM on single-GPU
- *  machines). Re-loaded lazily on the next "Mask + fit". `conformRegistered`
- *  stays true — the conform transform runs in a worker, not on this device. */
-async function freeMaskGpu(): Promise<void> {
-  if (maskInferer) {
-    await maskInferer.dispose()
-    maskInferer = null
-  }
-  if (maskDevice) maskDevice.destroy()
-  maskDevice = undefined // re-request from getBrainGPUDevice() next time
-}
-
-/** Run mindgrab on the b0 → a brain mask in conformed space, or null if WebGPU
- *  is unavailable (caller fits unmasked). `seq` is the input identity this mask
- *  belongs to; we bail if a newer input arrives so a superseded mask neither
- *  wastes GPU work nor mutates the canvas under the new input. */
+/** Run mindgrab on the b0 → a binary brain mask on the DWI's own grid. `seq` is
+ *  the input identity this mask belongs to; we bail if a newer input arrives so
+ *  a superseded mask doesn't waste GPU work. Throws if mindgrab can't run here
+ *  (no shader-f16, buffers too small); the caller then fits unmasked. */
 async function makeBrainMask(
   input: NonNullable<typeof state.input>,
   seq: number,
-): Promise<File | null> {
-  const inferer = await getMaskInferer()
-  if (!inferer || seq !== loadSeq) return null
+): Promise<File | undefined> {
   setStatus('Brain extraction (mindgrab)…')
   const b0 = await cropFirstVolume(input)
-  if (seq !== loadSeq) return null
-  const { prepareInput, buildMaskNifti } = await import('./dwi2trx/mindgrab')
-  // Load the transient b0 (just to get a parsed NVImage for conform) serialized
-  // on the canvas chain, so it can't interleave with a navigation swap if a new
-  // DWI is dropped mid-fit. Capture the NVImage inside the serialized step; the
-  // reference stays valid even after a later swap replaces nv.volumes.
-  const b0Img = await runOnCanvas(async () => {
-    await nv.loadVolumes([{ url: b0, name: 'b0.nii.gz' }])
-    shownView = null
-    return nv.volumes[0]
+  if (seq !== loadSeq) return
+  const { segment } = await import('@brainchop/mindgrab')
+  // `worker: true` keeps the page responsive and is the only real cancellation.
+  // `backend: 'webgpu'` because only that module is staged (see AGENTS.md);
+  // `auto` could otherwise reach for a WebGL2 file this app doesn't ship.
+  const { mask } = await segment(await b0.arrayBuffer(), {
+    model: 'mindgrab',
+    mask: true,
+    worker: true,
+    backend: 'webgpu',
+    assetPath: `${import.meta.env.BASE_URL}brainchop/`,
   })
-  if (seq !== loadSeq) return null // superseded during the transient load
-  const { conformed, img32 } = await prepareInput(maskCtx, b0Img)
-  const [labels] = await inferer(img32)
-  return new File([buildMaskNifti(conformed, labels)], 'maskconf.nii')
+  if (seq !== loadSeq || !mask) return
+  return new File([mask], 'mask.nii.gz')
 }
 
 // The input is already fully validated by resolveInput (volume count cross-
@@ -931,26 +882,18 @@ async function runFit(): Promise<void> {
   busy(true)
   setStatus('Fitting the diffusion tensor (niimath dtifit)…')
   try {
-    // Brain-mask with mindgrab. Non-fatal: null = WebGPU can't run it, a throw =
-    // a runtime mindgrab error — either way fall back to an unmasked fit rather
-    // than failing the whole tensor fit.
-    let maskConf: File | undefined
-    let maskErr: string | undefined
-    try {
-      maskConf = (await makeBrainMask(input, seq)) ?? undefined
-    } catch (err) {
-      maskErr = (err as Error).message // a runtime failure (vs. null = no GPU)
-      console.warn('[dwi2trx] mindgrab mask failed; fitting unmasked:', err)
-    }
+    // Brain-mask with mindgrab. Non-fatal: a GPU too small for the model throws
+    // a BrainchopError, so fall back to an unmasked fit rather than failing the
+    // whole tensor fit. A superseded input must not write the status line.
+    const mask = await makeBrainMask(input, seq).catch((err: unknown) => {
+      if (seq === loadSeq) {
+        const why = (err as Error)?.message ?? String(err)
+        setStatus(`Brain mask failed (${why}) — fitting without a mask.`)
+      }
+      return undefined
+    })
     if (seq !== loadSeq) return
-    if (!maskConf) {
-      setStatus(
-        maskErr
-          ? `Brain mask failed (${maskErr}) — fitting without a mask.`
-          : 'Brain mask unavailable (needs a WebGPU GPU with shader-f16) — fitting without a mask.',
-      )
-    }
-    const maps = await fitTensor(input, maskConf)
+    const maps = await fitTensor(input, mask)
     if (seq !== loadSeq) return // a newer input superseded this fit — discard
     state.maps = maps
     state.tracts = undefined // a new fit invalidates the old TRX
@@ -959,7 +902,7 @@ async function runFit(): Promise<void> {
     await syncView()
     if (seq !== loadSeq) return // re-check: a new input may have arrived during the swap
     setStatus(
-      `Tensor fit complete${maskConf ? ' (brain-masked)' : ''} — V1 modulated by FA.`,
+      `Tensor fit complete${mask ? ' (brain-masked)' : ''} — V1 modulated by FA.`,
     )
   } catch (err) {
     if (seq === loadSeq) {
@@ -1015,7 +958,6 @@ async function runTrack(): Promise<void> {
       import('./dwi2trx/tracking/sphere'),
       import('./dwi2trx/tracking/trx'),
     ])
-    await freeMaskGpu() // free mindgrab's ~1.4 GB GPU before the tracker allocates
     device = await getTrackingDevice() // throws a specific reason if unsupported
     const [sphere, bvalText, bvecText] = await Promise.all([
       loadSphere(),
@@ -1161,18 +1103,6 @@ let viewChain: Promise<void> = Promise.resolve()
 function syncView(): Promise<void> {
   viewChain = viewChain.then(doSyncView, doSyncView)
   return viewChain
-}
-
-/** Run a canvas operation serialized on the same chain as syncView, so a
- *  transient load (e.g. the mindgrab b0) can't interleave with a navigation
- *  swap and corrupt nv.volumes. Returns the op's result. */
-function runOnCanvas<T>(fn: () => Promise<T>): Promise<T> {
-  const run = viewChain.then(fn, fn)
-  viewChain = run.then(
-    () => {},
-    () => {},
-  )
-  return run
 }
 
 /** Fire-and-forget syncView for navigation, surfacing any display error. */

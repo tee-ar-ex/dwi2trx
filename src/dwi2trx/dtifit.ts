@@ -5,8 +5,8 @@
  * Mirrors commandline/commandline.txt but runs in native space. The fit is
  * UNMASKED by default: the b0 is T2-weighted, so an intensity (otsu) mask wrongly
  * drops white matter, and unmasked FA matches FSL in-brain (the FA floor hides
- * background noise). An optional mindgrab brain mask (`maskConf`) can be passed
- * for a background-free fit — see fitTensor.
+ * background noise). An optional mindgrab brain mask (`mask`) can be passed for
+ * a background-free fit — see fitTensor.
  *
  * `--dtifit` is a CLI mode (multi-input, multi-output), not a chainable
  * operator, so we drive the raw module directly: stage files into the Emscripten
@@ -81,15 +81,14 @@ export async function cropFirstVolume(input: DwiInput): Promise<File> {
  * is a single shared FS, so concurrent calls would collide; callers should also
  * disable the trigger UI while a fit runs.
  *
- * `maskConf` (optional): a mindgrab brain mask in *conformed* (256³) space. When
- * given, it is resliced to the native DWI grid (nearest-neighbour, no dilation
- * by default — see the inline comment), then dtifit is run masked — a
+ * `mask` (optional): a binary brain mask on the DWI's own grid, as
+ * @brainchop/mindgrab returns it. When given, dtifit runs masked — a
  * background-free fit. Without it, the fit is unmasked (the b0 is T2-weighted,
  * so an intensity mask wrongly drops white matter; unmasked FA matches FSL).
  */
 export async function fitTensor(
   input: DwiInput,
-  maskConf?: File,
+  mask?: File,
 ): Promise<TensorMaps> {
   if (inFlight) throw new Error('A tensor fit is already running.')
   inFlight = true
@@ -99,8 +98,6 @@ export async function fitTensor(
       'dwi.nii.gz',
       'dwi.bval',
       'dwi.bvec',
-      'b0.nii.gz',
-      'maskconf.nii',
       'mask.nii.gz',
       'dti_FA.nii.gz',
       'dti_MD.nii.gz',
@@ -148,30 +145,12 @@ export async function fitTensor(
         '-o',
         'dti',
       ]
-      if (maskConf) {
-        // Reslice the conformed mindgrab mask onto the native DWI grid (the b0
-        // is the reference), nearest-neighbour. NO dilation by default: the FA is
-        // very noisy at the scalp, so growing the mask outward pulls that noise
-        // into the fit. To re-enable a brainchop-style border, append a
-        // morphological close before the output, e.g.
-        //   ['maskconf.nii', '-reslice_nn', 'b0.nii.gz', '-close', '1', '2', '0', 'mask.nii.gz']
-        // (`-close 1 <border_mm> 0` = binarize at 1, dilate border_mm, erode 0).
-        // The b0 is often qform-only (FSL-preprocessed DWI, sform_code=0); niimath
-        // now fills a missing sform from the qform on read, so its reslice (which
-        // reads the sform matrix) aligns correctly. See vendor/niimath.
-        run(mod, ['dwi.nii.gz', '-crop', '0', '1', 'b0.nii.gz'], 'extract b0')
-        mod.FS_createDataFile(
-          '.',
-          'maskconf.nii',
-          await bytes(maskConf),
-          true,
-          true,
-        )
-        run(
-          mod,
-          ['maskconf.nii', '-reslice_nn', 'b0.nii.gz', 'mask.nii.gz'],
-          'reslice mask',
-        )
+      if (mask) {
+        // Already on the DWI grid (mindgrab reslices to the input space), so it
+        // goes straight to dtifit. NO dilation: the FA is very noisy at the
+        // scalp, so growing the mask outward pulls that noise into the fit — ask
+        // @brainchop/mindgrab for `borderMm` if a looser mask is ever wanted.
+        mod.FS_createDataFile('.', 'mask.nii.gz', await bytes(mask), true, true)
         dtifitArgs.splice(dtifitArgs.length - 2, 0, '-m', 'mask')
       }
       run(mod, dtifitArgs, 'tensor fit')

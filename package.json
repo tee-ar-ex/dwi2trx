@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Browser-only diffusion MRI pipeline: load DWI, fit the tensor, track streamlines, save TRX. No data leaves your machine.",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "dev": "node scripts/copy-brainchop.mjs && vite",
+    "build": "node scripts/copy-brainchop.mjs && tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
@@ -16,11 +16,11 @@
     "test:stress": "npm run build && node e2e/stress.mjs"
   },
   "dependencies": {
+    "@brainchop/mindgrab": "^0.1.20260813",
     "@niivue/dcm2niix": "^1.2.0",
     "@niivue/niimath": "file:./vendor/niimath",
     "@niivue/niivue": "1.0.0-rc.9",
-    "fflate": "^0.8.3",
-    "gl-matrix": "^3.4.4"
+    "fflate": "^0.8.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",

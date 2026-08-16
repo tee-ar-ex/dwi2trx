@@ -7,12 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": [
-      "**",
-      "!vendor",
-      "!src/lib/models/mindgrab.ts",
-      "!src/dwi2trx/tracking/goldens.json"
-    ]
+    "includes": ["**", "!vendor", "!src/dwi2trx/tracking/goldens.json"]
   },
   "formatter": {
     "enabled": true,

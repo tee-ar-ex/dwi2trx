@@ -92,13 +92,13 @@
   </footer>
 
   <dialog id="aboutDlg">
-    <h2>dwi2trx</h2>
+    <h2><a href="https://github.com/tee-ar-ex/dwi2trx/tree/main" target="_blank" rel="noopener">dwi2trx</a></h2>
     <p>A browser-only diffusion-MRI pipeline: load a DWI, fit the diffusion tensor, track streamlines, and save a TRX tractogram. Everything runs client-side — no data leaves your machine.</p>
     <p>It is built on
       <a href="https://github.com/niivue/niivue" target="_blank" rel="noopener">NiiVue</a> (visualization),
       <a href="https://github.com/niivue/niivue-dcm2niix" target="_blank" rel="noopener">dcm2niix</a> (image conversion),
       <a href="https://github.com/rordenlab/niimath" target="_blank" rel="noopener">niimath</a> (image processing),
-      <a href="https://github.com/neuroneural/brainchop" target="_blank" rel="noopener">brainchop</a>'s mindgrab (masking), and
+      <a href="https://www.npmjs.com/package/@brainchop/mindgrab" target="_blank" rel="noopener">brainchop</a>'s mindgrab (masking), and
       <a href="https://github.com/dipy/GPUStreamlines" target="_blank" rel="noopener">GPUStreamlines</a> to extract tracts from diffusion data.</p>
     <p><strong>Show vectors</strong> plots the diffusion gradient scheme (bvec/bval) in 3D — each direction as a ball at its b-vector, sized by how many samples repeat it and coloured by b-value. Inspecting it reveals the sampling distribution: whole- vs half-sphere coverage and single- vs multi-shell acquisitions. For why this matters, see the
       <a href="https://fsl.fmrib.ox.ac.uk/fsl/docs/diffusion/eddy/index.html" target="_blank" rel="noopener">FSL eddy documentation</a> and Winkler's
