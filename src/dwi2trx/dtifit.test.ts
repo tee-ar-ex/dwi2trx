@@ -1,6 +1,6 @@
 /**
  * End-to-end check of the niimath dtifit pipeline against the bundled sample.
- * Runs the real WASM (crop → mask → dtifit), so it needs the vendored niimath.
+ * Runs the real WASM (unmasked dtifit), so it needs the vendored niimath.
  * Run: node --experimental-strip-types src/dwi2trx/dtifit.test.ts  (Node 22+).
  */
 

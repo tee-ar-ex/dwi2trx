@@ -7,7 +7,7 @@ A browser-only diffusion-MRI pipeline: drag in a DWI, fit the diffusion tensor, 
 ## What it does
 
 1. **Select input** — drag-drop a DWI (a NIfTI + bval + bvec triple, or a folder of DICOMs converted in the browser). You can download sample DICOMs [17_DWI_dir80_AP](https://github.com/neurolabusc/dcm_qa_xa30/tree/main/In/17_DWI_dir80_AP) or sample NIfTI trios [17_DWI_dir80_AP](https://github.com/neurolabusc/dcm_qa_xa30/tree/main/Ref) from the web.
-2. **Tensor maps** — fit the diffusion tensor and view the principal eigenvector (V1) coloured by direction and modulated by fractional anisotropy (FA). The fit applies a mindgrab brain mask when WebGPU can run it, falling back to an unmasked fit otherwise.
+2. **Tensor maps** — fit the diffusion tensor and view the principal eigenvector (V1) coloured by direction and modulated by fractional anisotropy (FA). The fit applies a [@brainchop/mindgrab](https://www.npmjs.com/package/@brainchop/mindgrab) brain mask when WebGPU can run it, falling back to an unmasked fit otherwise.
 3. **Streamlines** — track white-matter streamlines on the GPU, render them over the FA in a clipped 3D view, and save a `.trx` tractogram. Seed/stop FA thresholds, step size, turn angle, and seed density are all adjustable.
 
 Two vector tools sit alongside the pipeline. **Show vectors** renders the loaded DWI's gradient scheme (bvec/bval) as a NiiVue ball preview — a b0 at the origin and each direction placed at unit(bvec)×√(b/bmax), sized by repeat count and coloured by b-value — so you can eyeball whole- vs half-sphere and single- vs multi-shell coverage. **Generate Vectors** designs a uniform multi-shell scheme (editable shells, uniformity α, b0-every-N) and exports Siemens DVS, GE tensor DAT (within GE's documented 6–300-volume range), or Philips `dti_vectors_input.txt`. Its two optimization modes are *simultaneous* (Winkler), for the strongest whole-scan uniformity and duty-cycle-balanced ordering, and *incremental* (Caruyer), which preserves construction order so truncated scans retain useful coverage. Optimization runs off the main thread in a Web Worker. Both modes are polarity-balanced (whole-sphere symmetric, for FSL Eddy) and canonically oriented before saving. Because each shell is optimized separately, the directions differ between b-values — Philips FiberTrak requires the same directions for every b-value, so process these acquisitions with an external pipeline. Verify any generated table on your scanner before acquisition.
@@ -30,6 +30,8 @@ npm test         # unit + DIPY golden tests (Node 22+)
 npm run test:e2e # real-WebGPU browser smoke (local-only; needs a GPU)
 ```
 
+`dev` and `build` first stage mindgrab's wasm into `public/brainchop/` (gitignored), so brain masking 404s if you run bare `vite` instead.
+
 ## Design
 
 This web page is a lean TypeScript wrapper around composable building blocks. It illustrates how AI-assisted coding can create useful tools by orchestrating proven, modular components. The current implementation is edge-based, with all processing running in the user's web browser. This preserves privacy (no data leaves the user's computer) and scales easily to many users (each provides their own compute). The trade-off is that every stage needs a lightweight, self-contained tool. The interface could also be extended with cloud resources for heavier processing, as illustrated in our [full-stack demo](https://github.com/niivue/fullstack-niivue-demo).
@@ -39,5 +41,5 @@ This web page is a lean TypeScript wrapper around composable building blocks. It
 - [NiiVue](https://niivue.com/) — WebGPU visualization
 - [dcm2niix](https://github.com/rordenlab/dcm2niix) — in-browser DICOM → NIfTI ([paper](https://pubmed.ncbi.nlm.nih.gov/26945974/))
 - [niimath](https://github.com/rordenlab/niimath) — image processing & tensor fitting ([paper](https://pubmed.ncbi.nlm.nih.gov/39268148/))
-- [brainchop](https://github.com/neuroneural/brainchop) — mindgrab brain masking ([paper](https://pubmed.ncbi.nlm.nih.gov/42331200/))
+- [@brainchop/mindgrab](https://www.npmjs.com/package/@brainchop/mindgrab) — mindgrab brain extraction ([paper](https://pubmed.ncbi.nlm.nih.gov/42331200/))
 - [GPUStreamlines](https://github.com/dipy/GPUStreamlines) — GPU tractography

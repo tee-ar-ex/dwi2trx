@@ -1,9 +1,9 @@
 /**
  * Integration test for the vendored niimath WASM: a qform-only NIfTI
  * (sform_code = 0, common in FSL-preprocessed DWI) must come back with the
- * sform filled in from the qform after a read. The masked tensor fit relies on
- * this — niimath's `-reslice_nn` reads the sform matrix only, so without the
- * sync the brain mask reslices to empty (see fitTensor + vendor/niimath).
+ * sform filled in from the qform after a read. Everything niimath emits inherits
+ * the repair — the b0 mindgrab masks, and the fit maps NiiVue displays — so
+ * without the sync those come back misplaced (see dtifit.ts + vendor/niimath).
  *
  * Run: node --experimental-strip-types src/dwi2trx/niimath-sform.test.ts
  */

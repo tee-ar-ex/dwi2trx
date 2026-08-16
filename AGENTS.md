@@ -12,6 +12,12 @@ dwi2trx is a browser-only diffusion-MRI demonstration: load NIfTI/bval/bvec or D
 - `src/dwi2trx/vectors.ts`: loaded-scheme parsing and visualization data.
 - `src/dwi2trx/genvectors.ts`: pure vector generation, conditioning, QC, ordering, and scanner serializers.
 
+## Brain masking (@brainchop/mindgrab)
+
+The mask is entirely the package's: `segment(b0, { model: 'mindgrab', mask: true, worker: true, backend: 'webgpu', assetPath })` returns a binary mask already on the input grid, so this repo holds no model, no conform step, and no mask GPU state. `dtifit.ts` stages the mask straight into niimath — do not reslice it, and do not dilate it (scalp FA is noisy; ask the package for `borderMm` instead). The worker acquires and releases its own device per call, so nothing has to be freed before the tracker allocates.
+
+The wasm module loads its emscripten glue by a URL computed at run time, and the glue finds its own `.wasm` through `import.meta.url`, so Vite can neither rewrite the import nor emit the assets. `scripts/copy-brainchop.mjs` stages them into gitignored `public/brainchop/` on every `dev`/`build`, and `assetPath` points there. Only the WebGPU pair is copied, so `backend: 'webgpu'` is pinned — `auto` would reach for WebGL2/CPU files this repo does not ship. That is safe because dwi2trx already requires WebGPU for tracking; a GPU without `shader-f16` or 512 MiB buffers throws a `BrainchopError`, which `runFit` catches and falls back to an unmasked fit.
+
 ## Commands and style
 
 - Validate with `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build`. Use `npm run test:e2e` when browser initialization, rendering, downloads, or the full pipeline changes; it requires Chrome and a real GPU.
@@ -32,8 +38,8 @@ dwi2trx is a browser-only diffusion-MRI demonstration: load NIfTI/bval/bvec or D
 ## NIfTI geometry and vendored niimath
 
 - `vendor/niimath/dist/` is the application dependency via `file:./vendor/niimath`; do not silently replace it with an npm build.
-- The vendored build repairs a missing/invalid sform from a valid qform. `src/dwi2trx/niimath-sform.test.ts` protects this behavior.
-- Tracking reads the original uploaded DWI, so it independently requires `readAffine()` in `src/lib/nifti-geometry.ts`: sform, then qform, then pixdim fallback. Removing either qform path breaks alignment for FSL-style qform-only images.
+- The vendored build repairs a missing/invalid sform from a valid qform. `src/dwi2trx/niimath-sform.test.ts` protects this behavior. Everything downstream inherits the repair: the b0 niimath crops for mindgrab, and the fit outputs NiiVue displays.
+- Tracking reads the original uploaded DWI, not a niimath output, so it needs its own `readAffine()` in `src/lib/nifti-geometry.ts`: sform, then qform, then pixdim fallback. Removing either qform path breaks alignment for FSL-style qform-only images.
 - niimath `callMain` is synchronous. If it throws, `dtifit.ts` invalidates the cached module because an aborted Emscripten runtime cannot safely be reused.
 
 ## Memory and cancellation
@@ -41,7 +47,7 @@ dwi2trx is a browser-only diffusion-MRI demonstration: load NIfTI/bval/bvec or D
 - Browser/WASM arrays have practical contiguous-memory limits regardless of physical RAM. `input-limits.ts` enforces the 2 GB input cap on every entry path and again after DICOM conversion.
 - A compressed NIfTI below the cap can still inflate beyond wasm32 or require too many fit intermediates. The failure is reported clearly and the poisoned niimath module is reset; exact preflight would require duplicate decompression and a peak-allocation model.
 - Tracking reads GPU output in 128 MB windows and adaptively halves seed batches on OOM down to `MIN_CHUNK`. Batch results merge only after complete readback, so retries must not duplicate streamlines.
-- Cancellation is observed between batches and readback windows, not inside a submitted GPU kernel or synchronous niimath call. Stale results must still be discarded through `loadSeq`.
+- Cancellation is observed between batches and readback windows, not inside a submitted GPU kernel, a synchronous niimath call, or a running mindgrab segmentation. Stale results must still be discarded through `loadSeq`.
 - Tracking retains decompressed DWI bytes plus one reordered float copy. Removing the remaining copy requires streaming decode and is intentionally deferred.
 - Free large voxel-space streamline arrays before constructing the NiiVue preview. A preview failure must not invalidate an already-created TRX download.
 

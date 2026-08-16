@@ -1,5 +1,9 @@
 node_modules/
 /dist/
+
+# Staged from node_modules by scripts/copy-brainchop.mjs on every dev/build run:
+# build output, versioned by the @brainchop/mindgrab dependency, not source.
+/public/brainchop/
 *.log
 .DS_Store
 

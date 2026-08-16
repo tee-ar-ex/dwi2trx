@@ -203,13 +203,30 @@ async function main() {
     )
     await page.click('#vecDlg form button')
 
-    // 2. mask + fit tensor -> Save maps enables (state.maps set). Works without
-    //    WebGPU (unmasked fallback), so a timeout here is a real regression.
+    // 2. mask + fit tensor -> Save maps enables (state.maps set). This test only
+    //    runs where a WebGPU adapter exists (checked above), so mindgrab must
+    //    actually mask here — both a timeout and an unmasked fit are regressions.
     console.log('→ Mask + fit tensor')
     await page.click('#maskFitBtn')
     await page.waitForSelector('#saveMapsBtn:not([disabled])', {
       timeout: 120000,
     })
+    // The final status lands after the map swap, so wait for it rather than
+    // sampling once. Swallow the timeout: the assert below reports the actual
+    // status text, which says more than "waitForFunction timed out".
+    await page
+      .waitForFunction(
+        () =>
+          /Tensor fit complete/.test(
+            document.getElementById('status').textContent || '',
+          ),
+        { timeout: 60000 },
+      )
+      .catch(() => {})
+    const fitStatus = await page.$eval('#status', (el) => el.textContent || '')
+    if (!/brain-masked/.test(fitStatus)) {
+      throw new Error(`mindgrab mask did not apply: ${fitStatus}`)
+    }
 
     // 3. generate streamlines. Either Save-TRX enables (success) or the status
     //    bar shows an error. An error is a SKIP only if it names a WebGPU/

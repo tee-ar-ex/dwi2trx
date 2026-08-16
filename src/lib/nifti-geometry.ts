@@ -9,9 +9,9 @@
  * Returns null if there's no qform (`qform_code <= 0`). Quaternion→matrix per
  * nifti1.h. `dv` must be positioned at the start of the 348-byte header.
  *
- * Tools that read only the sform (niimath's reslice, the streamline tracker's
- * voxel→RASMM) silently mishandle FSL-preprocessed DWI, which is commonly
- * qform-only (sform_code = 0). This recovers the geometry they need.
+ * Tools that read only the sform (the streamline tracker's voxel→RASMM) silently
+ * mishandle FSL-preprocessed DWI, which is commonly qform-only (sform_code = 0).
+ * This recovers the geometry they need.
  */
 export function qformAffineRows(dv: DataView): number[][] | null {
   const LE = true
