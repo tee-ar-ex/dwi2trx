@@ -9,9 +9,6 @@ export function baseName(name: string): string {
 }
 
 export const isNifti = (name: string): boolean => /\.nii(\.gz)?$/i.test(name)
-export const isBval = (name: string): boolean => /\.bval$/i.test(name)
-export const isBvec = (name: string): boolean => /\.bvec$/i.test(name)
-export const isJson = (name: string): boolean => /\.json$/i.test(name)
 
 /** Parse whitespace-separated numbers from one line (or the whole file). */
 export function parseNumbers(text: string): number[] {

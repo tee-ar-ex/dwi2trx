@@ -7,12 +7,11 @@ export type Step = 1 | 2 | 3
 
 export type InputSource = 'sample' | 'nifti' | 'dicom'
 
-/** A validated diffusion input: a NIfTI + matching bval/bvec (+ optional json). */
+/** A validated diffusion input: a NIfTI + matching bval/bvec. */
 export interface DwiInput {
   nifti: File
   bval: File
   bvec: File
-  json?: File
   /** Gradient directions = bval entries = NIfTI 4D volume count (all cross-checked). */
   directions: number
   source: InputSource

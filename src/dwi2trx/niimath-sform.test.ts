@@ -1,14 +1,14 @@
 /**
- * Integration test for the vendored niimath WASM: a qform-only NIfTI
+ * Integration test for the niimath WASM: a qform-only NIfTI
  * (sform_code = 0, common in FSL-preprocessed DWI) must come back with the
  * sform filled in from the qform after a read. Everything niimath emits inherits
  * the repair — the b0 mindgrab masks, and the fit maps NiiVue displays — so
- * without the sync those come back misplaced (see dtifit.ts + vendor/niimath).
+ * without the sync those come back misplaced (see dtifit.ts).
  *
  * Run: node --experimental-strip-types src/dwi2trx/niimath-sform.test.ts
  */
 import assert from 'node:assert/strict'
-// @ts-expect-error - the vendored WASM glue has no bundled types here
+// @ts-expect-error - the WASM glue has no bundled types here
 import niimathInit from '@niivue/niimath/niimath.js'
 
 const LE = true
@@ -68,4 +68,4 @@ ok(f(296 + 12), 20, 'srow_y[3]')
 ok(f(312 + 8), 2, 'srow_z[2]')
 ok(f(312 + 12), 30, 'srow_z[3]')
 
-console.log('niimath-sform.test: OK — vendored WASM syncs sform from qform')
+console.log('niimath-sform.test: OK — niimath syncs sform from qform')
