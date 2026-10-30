@@ -27,9 +27,10 @@ import {
   cancelSchemeGeneration,
   generateSchemeInWorker,
 } from './dwi2trx/genvectors-worker-client'
-import { collectFiles, type ResolvedInput, resolveInput } from './dwi2trx/input'
+import { collectFiles, resolveInput } from './dwi2trx/input'
 import { formatBytes, InputTooLargeError } from './dwi2trx/input-limits'
 import {
+  type DwiInput,
   type InputSource,
   type Step,
   state,
@@ -771,12 +772,7 @@ async function loadInputFiles(filesPromise: Promise<File[]>): Promise<void> {
   setStatus('Loading…')
   try {
     const resolved = await resolveInput(await filesPromise, controller.signal)
-    await loadInput(
-      resolved,
-      resolved.source,
-      seq,
-      resolved.source === 'dicom' ? 'DICOM → DWI' : 'DWI',
-    )
+    await loadInput(resolved, seq)
   } catch (err) {
     if (seq === loadSeq) {
       if (err instanceof InputTooLargeError) showLargeInputDialog(err)
@@ -835,14 +831,12 @@ async function makeBrainMask(
   if (seq !== loadSeq) return
   const { segment } = await import('@brainchop/mindgrab')
   // `worker: true` keeps the page responsive and is the only real cancellation.
-  // `backend: 'webgpu'` because only that module is staged (see AGENTS.md);
-  // `auto` could otherwise reach for a WebGL2 file this app doesn't ship.
+  // `backend: 'webgpu'`: tracking already requires WebGPU (see AGENTS.md).
   const { mask } = await segment(await b0.arrayBuffer(), {
     model: 'mindgrab',
     mask: true,
     worker: true,
     backend: 'webgpu',
-    assetPath: `${import.meta.env.BASE_URL}brainchop/`,
   })
   if (seq !== loadSeq || !mask) return
   return new File([mask], 'mask.nii.gz')
@@ -850,14 +844,15 @@ async function makeBrainMask(
 
 // The input is already fully validated by resolveInput (volume count cross-
 // checked against bval/bvec before we get here), so this just displays it.
-async function loadInput(
-  r: ResolvedInput,
-  source: InputSource,
-  seq: number,
-  label: string,
-): Promise<void> {
+const inputLabel: Record<InputSource, string> = {
+  sample: 'Sample DWI',
+  nifti: 'DWI',
+  dicom: 'DICOM → DWI',
+}
+
+async function loadInput(r: DwiInput, seq: number): Promise<void> {
   if (seq !== loadSeq) return // superseded by a newer load
-  state.input = { ...r, source }
+  state.input = r
   state.maps = undefined // new input invalidates any prior tensor fit
   state.tracts = undefined
   shownView = null // force the input view to (re)load through the chain
@@ -865,7 +860,7 @@ async function loadInput(
   await syncView() // serialized canvas swap (not a bare nv.loadVolumes)
   if (seq !== loadSeq) return
   setStatus(
-    `${label}: ${r.directions} volumes / directions. Press “Fit tensor”.`,
+    `${inputLabel[r.source]}: ${r.directions} volumes / directions. Press “Fit tensor”.`,
   )
 }
 
@@ -1251,7 +1246,7 @@ async function loadSample(): Promise<void> {
       fetchAsFile(`${base}dwi.bvec`),
     ])
     const resolved = await resolveInput([nii, bval, bvec], controller.signal)
-    await loadInput(resolved, 'sample', seq, 'Sample DWI')
+    await loadInput({ ...resolved, source: 'sample' }, seq)
   } catch (err) {
     if (seq === loadSeq)
       setStatus(`Failed to load sample: ${(err as Error).message}`, true)

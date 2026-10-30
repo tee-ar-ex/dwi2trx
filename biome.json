@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!vendor", "!src/dwi2trx/tracking/goldens.json"]
+    "includes": ["**", "!src/dwi2trx/tracking/goldens.json"]
   },
   "formatter": {
     "enabled": true,

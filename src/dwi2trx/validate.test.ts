@@ -9,7 +9,6 @@ import {
   baseName,
   chooseBestSeries,
   countDirections,
-  isBval,
   isNifti,
   parseNumbers,
 } from './validate.ts'
@@ -18,7 +17,6 @@ import {
 assert.equal(isNifti('dwi.nii.gz'), true)
 assert.equal(isNifti('dwi.nii'), true)
 assert.equal(isNifti('dwi.bval'), false)
-assert.equal(isBval('dwi.bval'), true)
 assert.equal(baseName('dwi.nii.gz'), 'dwi')
 assert.equal(baseName('sub-01_dwi.bvec'), 'sub-01_dwi')
 assert.equal(baseName('series_007.json'), 'series_007')

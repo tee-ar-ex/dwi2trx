@@ -16,7 +16,7 @@ Needs a recent desktop Chrome or Edge (WebGPU with subgroup support). Or just op
 
 ## Notes
 
-- **qform-only NIfTI** — FSL-preprocessed DWI is frequently stored qform-only (`sform_code = 0`). dwi2trx and its vendored niimath now derive the voxel→world geometry from the qform when the sform is missing, so the brain-masked fit and the streamlines stay aligned with the image.
+- **qform-only NIfTI** — FSL-preprocessed DWI is frequently stored qform-only (`sform_code = 0`). dwi2trx and niimath derive the voxel→world geometry from the qform when the sform is missing, so the brain-masked fit and the streamlines stay aligned with the image.
 - **Large datasets** — the constraint is working memory, not file size. Inputs above ~2 GB are rejected up front (before anything is read) with an explanatory dialog, because JavaScript/WebAssembly need contiguous in-memory arrays. Below that, a gzipped DWI still expands several-fold when decompressed, and tracking then allocates float copies, GPU buffers, readback windows, the TRX, and the 3D mesh on top — so a large DWI (e.g. ~800 MB / 129 volumes) can exhaust browser memory well below any 2 GB file ceiling. The tracker reads streamlines back in bounded windows and retries with smaller batches, and once tracking and TRX serialization succeed the `.trx` stays downloadable even if only the 3D preview runs out of memory. (Memory can still run out earlier — during input decompression, tracking, or TRX assembly — which fails the run.) For big data, start with higher Seed/Stop FA thresholds and lower Density to keep the streamline count (and memory) down.
 
 ## Develop
@@ -29,8 +29,6 @@ npm run lint     # Biome (lint + format check)
 npm test         # unit + DIPY golden tests (Node 22+)
 npm run test:e2e # real-WebGPU browser smoke (local-only; needs a GPU)
 ```
-
-`dev` and `build` first stage mindgrab's wasm into `public/brainchop/` (gitignored), so brain masking 404s if you run bare `vite` instead.
 
 ## Design
 

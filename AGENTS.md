@@ -14,9 +14,9 @@ dwi2trx is a browser-only diffusion-MRI demonstration: load NIfTI/bval/bvec or D
 
 ## Brain masking (@brainchop/mindgrab)
 
-The mask is entirely the package's: `segment(b0, { model: 'mindgrab', mask: true, worker: true, backend: 'webgpu', assetPath })` returns a binary mask already on the input grid, so this repo holds no model, no conform step, and no mask GPU state. `dtifit.ts` stages the mask straight into niimath — do not reslice it, and do not dilate it (scalp FA is noisy; ask the package for `borderMm` instead). The worker acquires and releases its own device per call, so nothing has to be freed before the tracker allocates.
+The mask is entirely the package's: `segment(b0, { model: 'mindgrab', mask: true, worker: true, backend: 'webgpu' })` returns a binary mask already on the input grid, so this repo holds no model, no conform step, and no mask GPU state. `dtifit.ts` stages the mask straight into niimath — do not reslice it, and do not dilate it (scalp FA is noisy; ask the package for `borderMm` instead). The worker acquires and releases its own device per call, so nothing has to be freed before the tracker allocates.
 
-The wasm module loads its emscripten glue by a URL computed at run time, and the glue finds its own `.wasm` through `import.meta.url`, so Vite can neither rewrite the import nor emit the assets. `scripts/copy-brainchop.mjs` stages them into gitignored `public/brainchop/` on every `dev`/`build`, and `assetPath` points there. Only the WebGPU pair is copied, so `backend: 'webgpu'` is pinned — `auto` would reach for WebGL2/CPU files this repo does not ship. That is safe because dwi2trx already requires WebGPU for tracking; a GPU without `shader-f16` or 512 MiB buffers throws a `BrainchopError`, which `runFit` catches and falls back to an unmasked fit.
+Vite emits the package's worker, glue, and `.wasm` itself (literal `new URL(..., import.meta.url)`), so no copy step or `assetPath` is needed; dev requires `optimizeDeps.exclude`. `backend: 'webgpu'` is pinned because dwi2trx already requires WebGPU for tracking; a GPU without `shader-f16` or 512 MiB buffers throws a `BrainchopError`, which `runFit` catches and falls back to an unmasked fit.
 
 ## Commands and style
 
@@ -28,6 +28,7 @@ The wasm module loads its emscripten glue by a URL computed at run time, and the
 ## Core lifecycle rules
 
 - `loadSeq` is the identity of the active dataset. Async work must check it before publishing state or touching a viewer.
+- `resolveInput` pairs NIfTI drops with dcm2niix `groupOutputs` (exact, case-sensitive stem) and takes DICOM pairs from `convert().series`. `convert` resolves on nonzero exits with partial output; the volume/direction cross-check catches truncation.
 - Every new input goes through `beginLoad()`, which aborts the preceding load before incrementing `loadSeq`. This is required to terminate obsolete dcm2niix workers and avoid overlapping WASM heaps.
 - The bundled sample loads only when no explicit user load began during WebGPU initialization.
 - Generator work uses a Web Worker and `genRevision`; edits, close, and replacement generation invalidate stale results and Save buttons.
@@ -35,12 +36,12 @@ The wasm module loads its emscripten glue by a URL computed at run time, and the
 - Blob download URLs are revoked on a later task; synchronous revocation can cancel Safari downloads.
 - A `<dialog>` ID rule with `display:flex` overrides the browser's closed-dialog rule. Apply layout display only to `[open]` dialogs.
 
-## NIfTI geometry and vendored niimath
+## NIfTI geometry and niimath
 
-- `vendor/niimath/dist/` is the application dependency via `file:./vendor/niimath`; do not silently replace it with an npm build.
-- The vendored build repairs a missing/invalid sform from a valid qform. `src/dwi2trx/niimath-sform.test.ts` protects this behavior. Everything downstream inherits the repair: the b0 niimath crops for mindgrab, and the fit outputs NiiVue displays.
+- `dtifit.ts` drives the raw Emscripten module (`@niivue/niimath/niimath.js`, typed by `niimath-module.d.ts`) because `--dtifit` has several inputs and outputs, which the worker chain API cannot express.
+- niimath repairs a missing/invalid sform from a valid qform. `src/dwi2trx/niimath-sform.test.ts` protects this behavior. Everything downstream inherits the repair: the b0 niimath crops for mindgrab, and the fit outputs NiiVue displays.
 - Tracking reads the original uploaded DWI, not a niimath output, so it needs its own `readAffine()` in `src/lib/nifti-geometry.ts`: sform, then qform, then pixdim fallback. Removing either qform path breaks alignment for FSL-style qform-only images.
-- niimath `callMain` is synchronous. If it throws, `dtifit.ts` invalidates the cached module because an aborted Emscripten runtime cannot safely be reused.
+- niimath `callMain` is synchronous. `dtifit.ts` reads all input bytes before staging, so stage→run→read→unlink has no `await` and calls cannot interleave. If `callMain` throws, the cached module is dropped because an aborted Emscripten runtime cannot be reused.
 
 ## Memory and cancellation
 
@@ -48,6 +49,7 @@ The wasm module loads its emscripten glue by a URL computed at run time, and the
 - A compressed NIfTI below the cap can still inflate beyond wasm32 or require too many fit intermediates. The failure is reported clearly and the poisoned niimath module is reset; exact preflight would require duplicate decompression and a peak-allocation model.
 - Tracking reads GPU output in 128 MB windows and adaptively halves seed batches on OOM down to `MIN_CHUNK`. Batch results merge only after complete readback, so retries must not duplicate streamlines.
 - Cancellation is observed between batches and readback windows, not inside a submitted GPU kernel, a synchronous niimath call, or a running mindgrab segmentation. Stale results must still be discarded through `loadSeq`.
+- `dtifit.ts` empties its staged byte array before `callMain`; holding it would double peak memory during the fit.
 - Tracking retains decompressed DWI bytes plus one reordered float copy. Removing the remaining copy requires streaming decode and is intentionally deferred.
 - Free large voxel-space streamline arrays before constructing the NiiVue preview. A preview failure must not invalidate an already-created TRX download.
 
@@ -70,3 +72,10 @@ The wasm module loads its emscripten glue by a URL computed at run time, and the
 - niimath fitting cannot be interrupted mid-call; a superseded fit may consume CPU until return, after which `loadSeq` discards it.
 - A single large tracking kernel completes before cancellation is observed. Finer cancellation requires smaller dispatches.
 - Automated stress testing exercises batching and readback but may not force a true host OOM on high-memory hardware; OOM decision logic is covered separately in `tracking/backoff.test.ts`.
+
+## Deferred simplifications (audit 2026-10-30)
+
+- Replace hand-written NIfTI header readers (`src/lib/nifti-geometry.ts`, `tracking/nifti-read.ts` header, `input.ts` `niftiVolumeCount`) with `nifti-reader-js` `readHeader()` (~250 lines incl. tests). Needs it as a direct dependency, and it prefers qform when `qform_code > sform_code`, so the sform→qform→pixdim rule above must be reworded and alignment re-verified.
+- Merge the two gunzip helpers (`input.ts` `readHeaderBytes`, `tracking/inputs.ts`) and collapse the triple GPU-size check in `tracking/inputs.ts` to the exact one in `readDataf`.
+- UX-trading cuts, owner's call: plain-Error large-input message instead of `largeInputDlg`; drop the fit OOM regex rewrite in `main.ts`; drop the pre-display volume-count check.
+- Vite emits every mindgrab model/backend (~13–17 MB in `dist`, lazy-loaded). Trimming needs build config.

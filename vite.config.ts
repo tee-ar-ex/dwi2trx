@@ -15,10 +15,9 @@ export default defineConfig({
   build: {
     target: 'esnext',
   },
-  // Vite's dep prebundler trips on the dynamic-import WASM workers used by
-  // @niivue/niimath and @niivue/dcm2niix. Excluding them keeps the worker
-  // scripts as standalone modules so their runtime URLs resolve.
+  // Vite's dep prebundler moves these into .vite/deps/, where their
+  // `new URL(..., import.meta.url)` workers and WASM 404.
   optimizeDeps: {
-    exclude: ['@niivue/dcm2niix', '@niivue/niimath'],
+    exclude: ['@niivue/dcm2niix', '@niivue/niimath', '@brainchop/mindgrab'],
   },
 })
